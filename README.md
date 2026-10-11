@@ -18,8 +18,8 @@ draggable wall.
 | **Dependency DAG** | Tasks are laid out on a lattice by topological depth; `parent → child` edges are drawn orthogonally, cycle-broken edges dashed. |
 | **Multi-profile wall** 多 Profile 大屏 | One card per `assignee`. Drag, resize, magnet-snap to neighbours and to the 8 px lattice. Overlaps are resolved automatically (卡片互相排开). |
 | **Card order** 卡片排序 | Cards that still draw task blocks come first, then by profile name (numeric suffixes compare numerically, unassigned last). Auto-arrange tiles in this order, so the busy profiles land top-left; a card whose blocks are all filtered out by the status legend sinks to the back. |
-| **Auto-arrange engine** 自动排列 v11 | Top-bar 自动排列 and the default layout: cards holding task blocks tile row-first (fill a row before wrapping) and their height auto-fits so the busy wall stays on one screen; collapsed empty cards gather into one compact shelf directly beneath, stretched to neat full-width rows. |
-| **Groups** 分组 | Drop a card onto another to form a group; members are tiled inside. Double-click the group title to rename in place. |
+| **Auto-arrange engine** 自动排列 v11–v12 | Top-bar 自动排列 and the default layout: cards holding task blocks tile row-first (fill a row before wrapping) and their height auto-fits so the busy wall stays on one screen; collapsed empty cards gather into one compact shelf directly beneath, packed side-by-side at their own content width (row-first, no stretched gaps). |
+| **Groups** 分组 | Drop a card onto another to form a group; members are tiled inside. Double-click the group title to rename in place. v12: groups NEST — drop a group's title bar onto another group (up to 4 levels, cycle-guarded; the store is always a legal forest); drag a nested group out of the body to extract it back to the wall; ✕ dissolves only the clicked level (children survive as top-level); empty group titles flow as compact strips inside the body, one per member group, draggable again. |
 | **Content-aware layout** 按内容排布 | Members that hold task blocks get a bigger share of the group body, empty ones shrink. |
 | **自动排列 per card** | A button on every card: put its task blocks back on the lattice, resize the card to its content, and (for a group) re-run the weighted layout. |
 | **Task detail popup** 任务详情 | Double-click any task block for status, assignee, model, timings, description, dependencies, recent runs, comments and events. |
@@ -103,6 +103,9 @@ clones successfully and then shows up nowhere.
 | drag the bottom-right grip | resize (bottom-right only; origin stays put) |
 | drop a card onto another | form a group |
 | drag a member inside a group | move it inside the card |
+| drag a group's title bar onto another group | NEST it (v12; cycle-proof — nesting into your own descendant is refused) |
+| drag a nested group out of its parent's body | extract it back to the wall as a top-level group |
+| click ✕ on a group | dissolve ONE level — member profiles free, child groups survive as top-level cards |
 | double-click a card header | maximise / restore |
 | double-click a task block | task detail popup (`Esc` or the backdrop closes it) |
 | double-click a group title | rename in place (`Enter` saves, `Esc` cancels) |

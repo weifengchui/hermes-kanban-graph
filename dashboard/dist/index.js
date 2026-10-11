@@ -72,7 +72,22 @@
   // group cards + maximised cards
   var GMIN_W = 320, GMIN_H = 230, GHEAD = 30, GBODY_PAD = 8, INNER_PAD = 6;
   var STRIP_H = 32, STRIP_H_IN = 28; // a collapsed card is just its title row (border 2 + head 28/24 + hairline 1 + border 1)
-  var STRIP_MIN_W = 260, STRIP_VGAP = 8; // v11 shelf: strips stretch to fill a row (min width) with a tighter row pitch
+  var STRIP_MIN_W = 260, STRIP_VGAP = 8; // v11 shelf constants (STRIP_MIN_W kept for layout compat)
+  // v12 (user 2026-10-11): wall strips are CONTENT width, not stretched rows —
+  // a collapsed card must not keep the footprint of an expanded one. Chrome =
+  // dot + title padding + count chip + × button; the 自动排列 button hides via
+  // .kg-pstrip.narrow CSS when the box cannot fit it.
+  var STRIP_BASE_W = 118, STRIP_MAX_W = 340, STRIP_AUTO_W = 62;
+  function stripW(name) {
+    return clamp(Math.round(STRIP_BASE_W + textPx(profLabel(name), 11)) + 4, STRIP_AUTO_W + 60, STRIP_MAX_W);
+  }
+  // v12 nesting: a group's members may hold profile names OR "§"+gid tokens
+  // (a nested group). A group has at most ONE parent (first ref wins); depth
+  // is capped so corrupt localStorage data can never loop the renderer.
+  var GTOK = "\u00a7";
+  var NEST_MAX = 4;
+  function isTok(m) { return typeof m === "string" && m.slice(0, 1) === GTOK; }
+  function tokGid(m) { return m.slice(1); }
   var IMIN_W = 180, IMIN_H = 108; // an inner (grouped) card may be smaller than a free one
   var MINI_SCALE_MAX_BIG = 2.4; // a maximised card may blow its mini graph up further
 
@@ -163,8 +178,11 @@
   function writeLayout(k, lay) { lsSet(LS_LAYOUT + k, JSON.stringify(lay || {})); }
 
   // ── group cards ──────────────────────────────────────────────────────────
-  // groups.<scope> = [{ id, name, members:[profile…], inner:{ profile:{x,y,w,h} } }]
+  // groups.<scope> = [{ id, name, members:[profile | "§"+gid …], inner:{ token:{x,y,w,h} } }]
   // `inner` rects are relative to the group body box (see groupBody).
+  // v12: a member may be a NESTED group token ("§"+gid). Sanitizer drops
+  // dangling/duplicate tokens so corrupt data cannot crash the recursive
+  // renderer (a group has at most one parent — first reference wins).
   function readGroups(k) {
     try {
       var arr = JSON.parse(lsGet(LS_GROUPS + k) || "[]"), out = [];
@@ -180,8 +198,51 @@
           out.push({ id: String(g.id), name: String(g.name || "分组"), members: g.members.map(String), inner: inner });
         });
       }
-      return out;
+      return sanitizeGroups(out);
     } catch (e) { return []; }
+  }
+  // shared sanitizer: drop dangling/duplicate/cyclic nested-group tokens, then
+  // drop containers that fell under the 2-member floor (read + every mutation
+  // path run through this so the store is ALWAYS a legal forest — the renderer
+  // never has to guess which edge of a broken cycle to honour).
+  function sanitizeGroups(out) {
+    var ids = {};
+    out.forEach(function (g) { ids[g.id] = 1; });
+    var parentOf = {};
+    function ancOf(id) { var s = {}, up = id; while (up) { s[up] = 1; up = parentOf[up]; } return s; }
+    out.forEach(function (g) {
+      var keep = [];
+      (g.members || []).forEach(function (m) {
+        if (!isTok(m)) { keep.push(m); return; }
+        var gid = tokGid(m);
+        if (!ids[gid] || gid === g.id || parentOf[gid]) return;
+        var a1 = ancOf(gid), a2 = ancOf(g.id);
+        if (a1[g.id] || a2[gid]) return; // this edge would close a cycle
+        parentOf[gid] = g.id;
+        keep.push(m);
+      });
+      g.members = keep;
+      Object.keys(g.inner || {}).forEach(function (p) { if (isTok(p) && g.members.indexOf(p) < 0) delete g.inner[p]; });
+    });
+    var floor = out.filter(function (g) { return g.members.length >= 2; });
+    // dropping a container can dangle tokens that referenced it — run back
+    // through until the store is a fixed point (each pass only removes)
+    if (floor.length !== out.length) return sanitizeGroups(floor);
+    return floor;
+  }
+  // is wantGid inside the subtree rooted at rootGid? (cycle guard for nesting)
+  function groupSubtreeHas(arr, rootGid, wantGid, depth) {
+    if (depth > NEST_MAX) return false;
+    var hit = false;
+    arr.forEach(function (c) {
+      if (c.id !== rootGid) return;
+      c.members.forEach(function (m) {
+        if (!isTok(m)) return;
+        if (tokGid(m) === wantGid) { hit = true; return; }
+        if (groupSubtreeHas(arr, tokGid(m), wantGid, depth + 1)) hit = true;
+      });
+    });
+    return hit;
   }
   function writeGroups(k, arr) {
     if (arr && arr.length) lsSet(LS_GROUPS + k, JSON.stringify(arr));
@@ -762,32 +823,47 @@
     return out;
   }
 
-  // v11: the collapsed-shelf counterpart — title-row strips stretch to fill a
-  // row (min width STRIP_MIN_W) below y0 with a tighter vertical pitch, so the
-  // empty cards sit together instead of scattering through the busy grid.
-  function shelfPack(n, W, y0, minW, stripH, gap, vgap) {
+  // v12: the collapsed-shelf flow — strips keep their CONTENT width (widths[])
+  // and pack left-to-right below y0, wrapping when the next one stops fitting.
+  // v11 stretched each strip to a full row; for collapsed cards that left huge
+  // empty footprints (user 2026-10-11: 收起的卡片也小一点、放到一起).
+  function shelfPack(widths, W, y0, stripH, gap, vgap) {
     var out = [];
-    if (n <= 0) return out;
-    gap = gap || PGAP; minW = minW || STRIP_MIN_W; stripH = stripH || STRIP_H;
+    if (!widths || !widths.length) return out;
+    gap = gap == null ? PGAP : gap;
+    stripH = stripH || STRIP_H;
     vgap = vgap == null ? STRIP_VGAP : vgap;
-    var cols = Math.max(1, Math.floor((W + gap) / (minW + gap)));
-    var w = Math.floor((W - (cols + 1) * gap) / cols);
-    for (var i = 0; i < n; i++) {
-      out.push({ x: gap + (i % cols) * (w + gap), y: y0 + Math.floor(i / cols) * (stripH + vgap), w: w, h: stripH });
+    W = Math.max(1, W);
+    var x = gap, rowY = y0;
+    for (var i = 0; i < widths.length; i++) {
+      // clamp into the canvas: a strip wider than the wall would start the
+      // next row at the same y and overlap
+      var w = Math.max(60, Math.min(widths[i], W - 2 * gap));
+      if (x + w > W - gap) { rowY += stripH + vgap; x = gap; }
+      out.push({ x: x, y: rowY, w: w, h: stripH });
+      x += w + gap;
     }
     return out;
+  }
+  // how many rows the flow needs (for wallPlan's shelf-height reservation)
+  function shelfRows(widths, W, gap) {
+    gap = gap == null ? PGAP : gap;
+    var out = shelfPack(widths, W, 0, STRIP_H, gap, STRIP_VGAP);
+    if (!out.length) return 0;
+    return Math.round((out[out.length - 1].y - out[0].y) / (STRIP_H + STRIP_VGAP)) + 1;
   }
 
   // v11.1: one plan for the whole wall (top 自动排列 + the unstored default
   // slots). Busy cards pack row-first at a comfortable height, but when the
   // viewport is shorter than rows*PDEF_H + the strip shelf, the cards shrink
   // toward PMIN_H so the wall keeps fitting without scrolling where it can.
-  function wallPlan(W, H, nFull, nSlim) {
+  // v12: `slimWidths` is the shelf strips' CONTENT widths (one per strip).
+  function wallPlan(W, H, nFull, slimWidths) {
+    slimWidths = slimWidths || [];
     var cols = Math.max(1, Math.min(Math.max(1, nFull), Math.floor((W + PGAP) / (PDEF_W + PGAP))));
     var rows = Math.ceil(nFull / cols);
-    var colsS = Math.max(1, Math.floor((W + PGAP) / (STRIP_MIN_W + PGAP)));
-    var shelfRows = Math.ceil(Math.max(0, nSlim) / colsS);
-    var shelfH = nSlim > 0 ? shelfRows * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + PGAP : 0;
+    var shelfRowsN = shelfRows(slimWidths, W, PGAP);
+    var shelfH = shelfRowsN > 0 ? shelfRowsN * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + PGAP : 0;
     var cardH = PDEF_H;
     if (nFull > 0) {
       var avail = H - (rows + 1) * PGAP - shelfH;
@@ -799,7 +875,7 @@
     var busy = rowPack(nFull, W, PDEF_W, cardH, PGAP);
     var busyBottom = PGAP;
     busy.forEach(function (r) { busyBottom = Math.max(busyBottom, r.y + r.h); });
-    var shelf = shelfPack(nSlim, W, busyBottom + PGAP, STRIP_MIN_W, STRIP_H, PGAP, STRIP_VGAP);
+    var shelf = shelfPack(slimWidths, W, busyBottom + PGAP, STRIP_H, PGAP, STRIP_VGAP);
     return { busy: busy, shelf: shelf, cardH: cardH, busyBottom: busyBottom };
   }
 
@@ -1817,30 +1893,95 @@
       return groups.filter(function (g) { return !hidden[g.name]; });
     }, [groups, hidden]);
 
-    // ── cards: group containers + free profiles, ordered by profile name ──
-    var items = useMemo(function () {
-      var owner = {};
-      gcfg.forEach(function (c) { c.members.forEach(function (m) { if (!owner[m]) owner[m] = c.id; }); });
+    // ── cards: group containers (recursively nested) + free profiles ──
+    // v12 (user 2026-10-11): a group may sit INSIDE another group — dragging
+    // group A onto group B makes A a member of B ("组合中的组合"). The store
+    // keeps that as a "§"+gid token in B.members; `items` only lists the
+    // TOP-LEVEL cards, each group item carries a resolved children tree.
+    var nest = useMemo(function () {
+      var cfgOf = {}, parentOf = {};
+      gcfg.forEach(function (c) { cfgOf[c.id] = c; });
+      // first-parent wins, and an edge that would CLOSE A CYCLE on the tree
+      // built so far is ignored (the referenced group simply stays top-level;
+      // cycles are impossible through the UI, this hardens restored stores)
+      function ancIs(id, want) {
+        var up = id;
+        while (up) { if (up === want) return true; up = parentOf[up]; }
+        return false;
+      }
+      gcfg.forEach(function (c) {
+        c.members.forEach(function (m) {
+          if (!isTok(m)) return;
+          var gid = tokGid(m);
+          if (!cfgOf[gid] || gid === c.id || parentOf[gid]) return;
+          if (ancIs(gid, c.id) || ancIs(c.id, gid)) return;
+          parentOf[gid] = c.id;
+        });
+      });
+      var owner = {};   // profile name -> TOP-LEVEL gid that (transitively) holds it
+      function walkOwner(c, depth, top) {
+        c.members.forEach(function (m) {
+          if (isTok(m)) { var ch = cfgOf[tokGid(m)]; if (ch && depth < NEST_MAX) walkOwner(ch, depth + 1, top); }
+          else if (!owner[m]) owner[m] = top;
+        });
+      }
+      gcfg.forEach(function (c) { if (!parentOf[c.id]) walkOwner(c, 0, c.id); });
+      var visiting = {};
+      function resolve(c, depth) {
+        var kids = [];
+        c.members.forEach(function (m) {
+          if (isTok(m)) {
+            var ch = cfgOf[tokGid(m)];
+            if (!ch || depth >= NEST_MAX || visiting[ch.id] || parentOf[ch.id] !== c.id) return;
+            visiting[ch.id] = 1;
+            var sub = resolve(ch, depth + 1);
+            delete visiting[ch.id];
+            if (sub.length) kids.push({ kind: "group", cfg: ch, children: sub });
+            return;
+          }
+          if (byName[m] && !hidden[m]) kids.push({ kind: "prof", prof: byName[m] });
+        });
+        return kids;
+      }
+      function visBlocks(k) {
+        if (k.kind === "prof") { var pn = panels[k.prof.name]; return visibleBlocks(pn && pn.model, props.hideSt); }
+        var n = 0; k.children.forEach(function (q) { n += visBlocks(q); });
+        return n;
+      }
+      function kidName(k) { return k.kind === "prof" ? k.prof.name : k.cfg.name; }
+      function orderKids(kids) {
+        return kids.slice().sort(function (a, b) {
+          var d = (visBlocks(b) > 0 ? 1 : 0) - (visBlocks(a) > 0 ? 1 : 0);
+          if (d) return d;
+          return nameCmp(kidName(a), kidName(b));
+        });
+      }
+      function kidTok(k) { return k.kind === "prof" ? k.prof.name : GTOK + k.cfg.id; }
+      // weight for the weighted treemap: profiles by own blocks, nested
+      // groups by the TOTAL under them (capped like profWeight saturates)
+      function kidWeight(k) { return profWeight(visBlocks(k)); }
+      function collectProfs(kids, out) {
+        out = out || [];
+        kids.forEach(function (k) { if (k.kind === "prof") out.push(k.prof); else collectProfs(k.children, out); });
+        return out;
+      }
       var out = [], seen = {};
       visible.forEach(function (g) {
         var gid = owner[g.name];
         if (!gid) { out.push({ id: g.name, kind: "prof", prof: g }); return; }
         if (seen[gid]) return;
         seen[gid] = 1;
-        var cfg = null, i;
-        for (i = 0; i < gcfg.length; i++) if (gcfg[i].id === gid) cfg = gcfg[i];
+        var cfg = cfgOf[gid];
         if (!cfg) { out.push({ id: g.name, kind: "prof", prof: g }); return; }
-        var members = [];
-        cfg.members.forEach(function (m) { if (byName[m] && !hidden[m]) members.push(byName[m]); });
-        if (!members.length) return;
-        // the same order rule applies INSIDE a card: members that still draw
-        // blocks first, then by name — so the busy member takes the big first
-        // slot instead of landing last (user 2026-10-11)
-        members = orderCards(members, props.hideSt);
-        out.push({ id: GKEY + gid, kind: "group", cfg: cfg, members: members });
+        var kids = orderKids(resolve(cfg, 0));
+        if (!kids.length) return;
+        out.push({ id: GKEY + gid, kind: "group", cfg: cfg, children: kids });
       });
-      return out;
-    }, [visible, gcfg, byName, hidden, props.hideSt]);
+      return { items: out, cfgOf: cfgOf, parentOf: parentOf, visBlocks: visBlocks, kidTok: kidTok, kidWeight: kidWeight, kidName: kidName, orderKids: orderKids, collectProfs: collectProfs };
+    }, [visible, gcfg, byName, hidden, panels, props.hideSt]);
+    var items = nest.items;
+    // debug handle (harmless; headless probes assert through this)
+    window.__KG_NEST__ = { parentOf: nest.parentOf, items: items.map(function (i) { return i.id; }), byName: Object.keys(byName) };
 
     // stored (manual) rects win; anything without one takes the first free slot
     // v10: a profile card that paints no blocks renders as a title-row strip;
@@ -1852,8 +1993,10 @@
       for (var z = 0; z < items.length; z++) if (items[z].id === id) { it = items[z]; break; }
       if (!it || it.kind !== "prof" || !r) return r;
       var pn = panels[it.prof.name];
+      // v12: a collapsed strip shrinks to CONTENT width too (storage keeps the
+      // expanded width untouched, so it grows straight back on re-entry)
       return visibleBlocks(pn && pn.model, props.hideSt) === 0
-        ? { x: r.x, y: r.y, w: r.w, h: STRIP_H }
+        ? { x: r.x, y: r.y, w: Math.min(r.w, stripW(it.prof.name)), h: STRIP_H }
         : { x: r.x, y: r.y, w: r.w, h: Math.max(r.h, PMIN_H) };
     }
     var rects = useMemo(function () {
@@ -1870,7 +2013,8 @@
       });
       var fulls = items.filter(function (it) { return !slimIds[it.id]; });
       var strips = items.filter(function (it) { return !!slimIds[it.id]; });
-      var plan = wallPlan(csize.w, csize.h, fulls.length, strips.length);
+      var stripWidths = strips.map(function (it) { return stripW(it.prof.name); });
+      var plan = wallPlan(csize.w, csize.h, fulls.length, stripWidths);
       var busySlots = plan.busy;
       var busyBottom = plan.busyBottom;
       fulls.forEach(function (it) {
@@ -1878,7 +2022,7 @@
         var rr = effRect(it.id, base[it.id]);
         busyBottom = Math.max(busyBottom, rr.y + rr.h);
       });
-      var shelfSlots = shelfPack(strips.length, csize.w, busyBottom + PGAP, STRIP_MIN_W, STRIP_H, PGAP, STRIP_VGAP);
+      var shelfSlots = shelfPack(stripWidths, csize.w, busyBottom + PGAP, STRIP_H, PGAP, STRIP_VGAP);
       items.forEach(function (it) { if (base[it.id]) claimed.push(effRect(it.id, base[it.id])); });
       items.forEach(function (it) {
         if (base[it.id]) { out[it.id] = effRect(it.id, base[it.id]); return; }
@@ -1920,30 +2064,49 @@
       return out;
     }, [shown]);
 
-    // member rects inside every group card (relative to the group body box)
+    // member rects inside every group card (relative to the group body box).
+    // v12: recursion — a nested group gets its own inner map keyed by the
+    // same gid scheme, plus its absolute surface rect (drag math and drop
+    // hit-testing inside the up-handler need it without walking the DOM).
+    var nestAbsRef = useRef({});
     var innerRects = useMemo(function () {
-      var out = {};
+      var out = {}, abs = {};
+      function fill(gid, cfg, kids, cardR) {
+        var body = groupBody(cardR);
+        var toks = kids.map(nest.kidTok);
+        var ir = innerLayout(toks, cfg.inner, body, INNER_PAD, kids.map(nest.kidWeight));
+        kids.forEach(function (k) {
+          var t = nest.kidTok(k), q = ir[t];
+          if (!q) return;
+          if (k.kind === "prof") {
+            var pn = panels[k.prof.name];
+            ir[t] = visibleBlocks(pn && pn.model, props.hideSt) === 0
+              ? { x: q.x, y: q.y, w: q.w, h: STRIP_H_IN }
+              : { x: q.x, y: q.y, w: q.w, h: Math.max(q.h, IMIN_H) };
+            return;
+          }
+          var empty = nest.visBlocks(k) === 0;
+          var r2 = empty ? { x: q.x, y: q.y, w: q.w, h: STRIP_H_IN }
+                         : { x: q.x, y: q.y, w: q.w, h: Math.max(q.h, Math.min(GMIN_H, body.h)) };
+          ir[t] = r2;
+          // v12: every nested card carries its absolute rect (also empty
+          // strips — pull-out math needs it); inner maps are filled one
+          // level deeper only when the child actually renders a body.
+          abs[k.cfg.id] = { x: cardR.x + body.x + r2.x, y: cardR.y + body.y + r2.y, w: r2.w, h: r2.h };
+          if (!empty) fill(k.cfg.id, k.cfg, k.children, r2);
+        });
+        out[gid] = ir;
+      }
       items.forEach(function (it) {
         if (it.kind !== "group") return;
         var r = shown[it.id];
         if (!r) return;
-        var body = groupBody(r);
-        var ir = innerLayout(
-          it.members.map(function (m) { return m.name; }),
-          it.cfg.inner, body, INNER_PAD,
-          it.members.map(function (m) { return profWeight(blockCount(m, props.hideSt)); }));
-        it.members.forEach(function (m) {
-          var q = ir[m.name];
-          if (!q) return;
-          var pn = panels[m.name];
-          ir[m.name] = visibleBlocks(pn && pn.model, props.hideSt) === 0
-            ? { x: q.x, y: q.y, w: q.w, h: STRIP_H_IN }
-            : { x: q.x, y: q.y, w: q.w, h: Math.max(q.h, IMIN_H) };
-        });
-        out[it.cfg.id] = ir;
+        abs[it.cfg.id] = r;
+        fill(it.cfg.id, it.cfg, it.children, r);
       });
+      nestAbsRef.current = abs;
       return out;
-    }, [items, shown, props.hideSt]);
+    }, [items, shown, panels, props.hideSt, nest]);
 
     var inv = useMemo(function () {
       if (!frozenInRef.current) return innerRects;
@@ -1969,7 +2132,7 @@
       writeLayout(keyRef.current, nxt);
     }
     function applyGroups(arr) {
-      var clean = arr.filter(function (c) { return c.members && c.members.length >= 2; });
+      var clean = sanitizeGroups((arr || []).filter(function (c) { return c && c.id && Array.isArray(c.members); }));
       gcfgRef.current = clean;
       setGcfg(clean);
       writeGroups(keyRef.current, clean);
@@ -2071,9 +2234,50 @@
       applyLayout(lay);
     }
     function dissolve(gid) {
-      var arr = gcfgRef.current.filter(function (c) { return c.id !== gid; });
+      var tok = GTOK + gid;
+      var arr = gcfgRef.current.filter(function (c) { return c.id !== gid; }).map(function (c) {
+        if (c.members.indexOf(tok) < 0) return c;
+        var inner = Object.assign({}, c.inner); delete inner[tok];
+        return { id: c.id, name: c.name, members: c.members.filter(function (m) { return m !== tok; }), inner: inner };
+      });
       var lay = Object.assign({}, layoutRef.current);
       delete lay[GKEY + gid];
+      applyGroups(arr);
+      applyLayout(lay);
+    }
+    // v12 (user 2026-10-11): dropping a group onto another group NESTS it —
+    // "组合中的组合" instead of flattening both into one container. Guards:
+    // no self-nest, no cycles (target inside the mover's own subtree), one
+    // parent max (token is stripped from every other container first).
+    function nestInto(fromGid, toGid) {
+      if (!fromGid || !toGid || fromGid === toGid) return;
+      var cur = gcfgRef.current;
+      var has = {}; cur.forEach(function (c) { has[c.id] = 1; });
+      if (!has[fromGid] || !has[toGid]) return;
+      if (groupSubtreeHas(cur, fromGid, toGid, 0)) return; // would close a cycle
+      var tok = GTOK + fromGid;
+      var arr = cur.map(function (c) {
+        var members = c.members.filter(function (m) { return m !== tok; });
+        var inner = Object.assign({}, c.inner); delete inner[tok];
+        if (c.id === toGid && members.indexOf(tok) < 0) members = members.concat([tok]);
+        return { id: c.id, name: c.name, members: members, inner: inner };
+      });
+      var lay = Object.assign({}, layoutRef.current);
+      delete lay[GKEY + fromGid];
+      applyGroups(arr);
+      applyLayout(lay);
+    }
+    // pulling a nested group out of its parent onto the wall: it becomes a
+    // free top-level group card again at `atRect` (surface coords)
+    function extractGroup(gid, atRect) {
+      var tok = GTOK + gid;
+      var arr = gcfgRef.current.map(function (c) {
+        if (c.members.indexOf(tok) < 0) return c;
+        var inner = Object.assign({}, c.inner); delete inner[tok];
+        return { id: c.id, name: c.name, members: c.members.filter(function (m) { return m !== tok; }), inner: inner };
+      });
+      var lay = Object.assign({}, layoutRef.current);
+      lay[GKEY + gid] = atRect;
       applyGroups(arr);
       applyLayout(lay);
     }
@@ -2124,7 +2328,10 @@
         if (op.scope === "inner") {
           // free follow inside the container: leaving it is how a card escapes
           setGuides(null);
-          var body = groupBody(view[GKEY + op.gid] || view[op.gid] || { w: GMIN_W, h: GMIN_H });
+          // v12: the container may be a NESTED group — its surface rect is not
+          // in `view` (only top-level cards are); nestAbs carries every level.
+          var cRect = nestAbsRef.current[op.gid] || view[GKEY + op.gid] || view[op.gid] || { w: GMIN_W, h: GMIN_H };
+          var body = groupBody(cRect);
           var ires = op.kind === "move"
             ? snapMove(base, innerOthersOf(op.id, op.gid), body, SNAP, GRID)
             : snapResize({ x: op.ox, y: op.oy, w: op.ow, h: op.oh }, dx, dy,
@@ -2163,10 +2370,10 @@
           var live = innerRects[op.gid] || {};
           var prev = (fzIn && fzIn.gid === op.gid) ? fzIn.rects : live;
           var r = live[op.id];
-          var it = null;
-          items.forEach(function (x) { if (x.kind === "group" && x.cfg.id === op.gid) it = x; });
-          if (!r || !it) return;
-          var gr = view[it.id] || view[GKEY + op.gid];
+          // v12: the container may be a NESTED group — do not look it up in
+          // `items` (top-level only); the cfg map and nestAbs cover all levels.
+          if (!r || !nest.cfgOf[op.gid]) return;
+          var gr = nestAbsRef.current[op.gid];
           if (!gr) return;
           var body = groupBody(gr);
           var rw = (rawRef.current && rawRef.current.gid === op.gid && rawRef.current.id === op.id)
@@ -2178,19 +2385,67 @@
             ? !insideRect({ x: gr.x - pad, y: gr.y - pad, w: gr.w + 2 * pad, h: gr.h + 2 * pad }, ptr)
             : !insideRect(gr, { x: abs.x + abs.w / 2, y: abs.y + abs.h / 2 });
           if (op.kind === "move" && escaped) {
-            // pulled clean out of the container -> a free card again; it must land
-            // next to the container, never on top of it
-            var othersT = items.filter(function (x) { return x.id !== it.id; })
+            // v12: escaping a container over ANOTHER top-level card joins it
+            // (profile -> member, nested group -> NESTED member "组合中的组合");
+            // escaping over empty wall lands as a free card next to the
+            // container, never on top of it.
+            var ptU = (e && typeof e.clientX === "number")
+              ? { x: e.clientX - op.org.x, y: e.clientY - op.org.y }
+              : { x: abs.x + abs.w / 2, y: abs.y + abs.h / 2 };
+            var tg = null;
+            items.forEach(function (x) {
+              if (x.id === GKEY + op.gid) return;
+              var rr2 = view[x.id];
+              if (rr2 && insideRect(rr2, ptU)) tg = x;
+            });
+            if (!tg) {
+              items.forEach(function (x) {
+                if (x.id === GKEY + op.gid || tg) return;
+                var rr3 = view[x.id];
+                if (rr3 && insideRect(rr3, { x: abs.x + abs.w / 2, y: abs.y + abs.h / 2 })) tg = x;
+              });
+            }
+            if (tg) {
+              if (isTok(op.id)) {
+                if (tg.kind === "group") nestInto(tokGid(op.id), tg.cfg.id);
+                else {
+                  var g2 = mintGroup([tg.id, op.id]);
+                  var lay2b = Object.assign({}, layoutRef.current);
+                  lay2b[GKEY + g2.id] = groupRectFor(view[tg.id], nestAbsRef.current[tokGid(op.id)]);
+                  delete lay2b[tg.id];
+                  applyGroups(gcfgRef.current.concat([g2]));
+                  applyLayout(lay2b);
+                }
+                return;
+              }
+              if (tg.kind === "group") { addToGroup(tg.cfg.id, op.id); return; }
+              var g3 = mintGroup([tg.id, op.id]);
+              var lay3 = Object.assign({}, layoutRef.current);
+              lay3[GKEY + g3.id] = groupRectFor(view[tg.id], abs);
+              delete lay3[tg.id];
+              delete lay3[op.id];
+              applyGroups(gcfgRef.current.concat([g3]));
+              applyLayout(lay3);
+              return;
+            }
+            var othersT = items.filter(function (x) { return x.id !== GKEY + op.gid; })
               .map(function (x) { return { id: x.id, rect: view[x.id] }; })
               .filter(function (o) { return o.rect; });
             var obstacles = othersT.map(function (o) { return o.rect; }).concat([gr]);
             var drop = nearestFree({ x: Math.max(0, abs.x), y: Math.max(0, abs.y), w: abs.w, h: abs.h }, obstacles, GRID, 80);
             var moves = pushAside(drop, othersT, GRID);
-            leaveGroup(op.id, drop);
             var lay2 = Object.assign({}, layoutRef.current);
-            lay2[op.id] = drop;
-            Object.keys(moves).forEach(function (id) { lay2[id] = moves[id]; });
-            applyLayout(lay2);
+            if (isTok(op.id)) {
+              extractGroup(tokGid(op.id), drop);
+              lay2[GKEY + tokGid(op.id)] = drop; // extract applied it; keep it through the moves merge
+              Object.keys(moves).forEach(function (id) { lay2[id] = moves[id]; });
+              applyLayout(lay2);
+            } else {
+              leaveGroup(op.id, drop);
+              lay2[op.id] = drop;
+              Object.keys(moves).forEach(function (id) { lay2[id] = moves[id]; });
+              applyLayout(lay2);
+            }
             return;
           }
           // stayed inside: clamp it, then let the members it covers step aside
@@ -2240,7 +2495,10 @@
         if (tgt) {
           var isG = op.id.slice(0, 2) === GKEY;
           if (tgt.kind === "group") {
-            if (isG) mergeGroups(op.id.slice(2), tgt.cfg.id);
+            // v12: group onto group = NEST ("组合中的组合"), no longer a flat
+            // merge (user 2026-10-11). Profiles joining a group keep the old
+            // addToGroup path below.
+            if (isG) nestInto(op.id.slice(2), tgt.cfg.id);
             else addToGroup(tgt.cfg.id, op.id);
             return;
           }
@@ -2366,12 +2624,25 @@
         applyLayout(nxt);
         return;
       }
+      // v12: clearing a group's manual member rects clears the WHOLE subtree
+      // (nested groups tile back too), and every profile under it re-tiles
+      // its blocks — 自动排列 means "put everything below back in order".
+      var toClear = {};
+      (function walkClear(c, d) {
+        if (!c || toClear[c.id] || d > NEST_MAX) return;
+        toClear[c.id] = 1;
+        c.members.forEach(function (m) { if (isTok(m)) walkClear(nest.cfgOf[tokGid(m)], d + 1); });
+      })(nest.cfgOf[gid], 0);
       applyGroups(gcfgRef.current.map(function (c) {
-        return c.id === gid ? { id: c.id, name: c.name, members: c.members, inner: {} } : c;
+        return toClear[c.id] ? { id: c.id, name: c.name, members: c.members, inner: {} } : c;
       }));
-      var it = null;
-      items.forEach(function (x) { if (x.kind === "group" && x.cfg.id === gid) it = x; });
-      if (it) it.members.forEach(function (m) { arrangeBlocks(m.name); });
+      (function walkProfs(c, d) {
+        if (!c || d > NEST_MAX) return;
+        c.members.forEach(function (m) {
+          if (isTok(m)) walkProfs(nest.cfgOf[tokGid(m)], d + 1);
+          else if (byName[m] && !hidden[m]) arrangeBlocks(m);
+        });
+      })(nest.cfgOf[gid], 0);
     }
 
     function toggleProf(name) {
@@ -2399,14 +2670,14 @@
       // top of the view = cards with blocks, below = only title-row bars.
       // v11.1: wallPlan shrinks card rows toward PMIN_H when the viewport is
       // tight, so the busy area + shelf fit the screen where it can.
-      var plan = wallPlan(W, H, full.length, slim.length);
+      var plan = wallPlan(W, H, full.length, slim.map(function (it) { return stripW(it.prof.name); }));
       var slots = plan.busy;
       var nxt = Object.assign({}, layoutRef.current);
       var maxY = PGAP, i;
       full.forEach(function (it, i2) { if (slots[i2]) { nxt[it.id] = slots[i2]; maxY = Math.max(maxY, slots[i2].y + slots[i2].h); } });
       // stored h = STRIP_H, and effRect lifts it back to PMIN_H when the card
       // grows blocks again, so the persisted row never clips content.
-      var shelf = shelfPack(slim.length, W, maxY + PGAP, STRIP_MIN_W, STRIP_H, PGAP, STRIP_VGAP);
+      var shelf = shelfPack(slim.map(function (it) { return stripW(it.prof.name); }), W, maxY + PGAP, STRIP_H, PGAP, STRIP_VGAP);
       slim.forEach(function (it, i2) { if (shelf[i2]) nxt[it.id] = shelf[i2]; });
       applyLayout(nxt);
       applyGroups(gcfgRef.current.map(function (c) { return { id: c.id, name: c.name, members: c.members, inner: {} }; }));
@@ -2542,6 +2813,7 @@
       var isAct = activeOp && activeOp.id === g.name && (!gid || activeOp.gid === gid);
       var pn = panels[g.name];
       var slim = !big && visibleBlocks(pn && pn.model, props.hideSt) === 0;
+      var narrow = slim && r.w < 210; // v12 shelf: hide the arrange button on content-width strips
       var kids = [headBar(g, gid)];
       if (!slim) {
         kids.push(h(PanelBody, {
@@ -2556,38 +2828,62 @@
       }
       return h("div", {
         key: (gid ? gid + "/" : "") + g.name,
-        className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : "") + (slim ? " kg-pstrip" : ""),
+        className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : "") + (slim ? " kg-pstrip" : "") + (narrow ? " kg-pnarrow" : ""),
         "data-prof": g.name,
         "data-in-group": gid || "",
         style: { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px", borderTopColor: col }
       }, kids);
     }
 
-    function renderGroup(it, r, big) {
+    // v12: recursive group renderer. A nested group is drawn inside its
+    // parent body with the same machinery (weighted tiling, strips, resize,
+    // gauto); `parentGid` flips the drag scope to "inner" and the double-tap
+    // semantics from maximise to pull-out.
+    function renderGroup(it, r, big, parentGid) {
       var cfg = it.cfg, body = groupBody(r);
       var inn = inv[cfg.id] || {};
-      var isAct = activeOp && activeOp.id === it.id;
+      var nested = !!parentGid;
+      var tokSelf = GTOK + cfg.id;
+      var isAct = activeOp && activeOp.id === (nested ? tokSelf : it.id);
       var rw = rawRef.current;
-      var mem = it.members.map(function (m) {
-        var ir = inn[m.name];
-        if (rw && rw.gid === cfg.id && rw.id === m.name) ir = rw.rect;
-        return ir ? renderProf(m, ir, false, cfg.id) : null;
+      function pullOut() {
+        var a = nestAbsRef.current[cfg.id] || { x: r.x, y: r.y, w: r.w, h: r.h };
+        var obs = items.map(function (x) { return view[x.id]; }).filter(Boolean);
+        extractGroup(cfg.id, nearestFree(
+          { x: Math.max(0, a.x), y: Math.max(0, a.y), w: Math.max(GMIN_W, a.w), h: Math.max(GMIN_H, a.h) },
+          obs, GRID, 80));
+      }
+      var mem = (it.children || []).map(function (k) {
+        var t = nest.kidTok(k);
+        var ir = inn[t];
+        if (rw && rw.gid === cfg.id && rw.id === t) ir = rw.rect;
+        if (!ir) return null;
+        if (k.kind === "prof") return renderProf(k.prof, ir, false, cfg.id);
+        if (nest.visBlocks(k) === 0) return renderGroupStrip(k, ir, cfg.id);
+        return renderGroup(k, ir, false, cfg.id);
       });
       return h("div", {
-        key: it.id,
-        className: "kg-group" + (isAct ? " kg-pactive" : "") + (big ? " kg-gbig" : ""),
-        "data-group": cfg.id, "data-prof": it.id,
+        key: nested ? parentGid + "/" + tokSelf : it.id,
+        className: "kg-group" + (isAct ? " kg-pactive" : "") + (big ? " kg-gbig" : "") + (nested ? " kg-gnest" : ""),
+        "data-group": cfg.id, "data-prof": nested ? tokSelf : it.id,
+        "data-in-group": parentGid || "",
         style: { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" }
       },
         h("div", {
-          className: "kg-ghead", title: "双击标题改名 · 双击空白处放大 / 还原 · 拖到别的卡片上可合并",
-          onPointerDown: function (e) { opDown("move", it.id, e, "top"); },
+          className: "kg-ghead" + (nested ? " kg-ghead-n" : ""),
+          title: nested ? "拖动在父组内摆位 · 双击组名改名 · 双击空白移出父组 · 拖到别的卡片上可再嵌套"
+                        : "双击标题改名 · 双击空白处放大 / 还原 · 拖到别的分组上=组合套组合 · 拖卡片上=并组",
+          onPointerDown: function (e) {
+            if (nested) opDown("move", tokSelf, e, "inner", parentGid);
+            else opDown("move", it.id, e, "top");
+          },
           onPointerUp: function (e) {
             var t = e && e.target;
             if (t && String(t.className || "").indexOf("kg-gname") >= 0) {
-              dblTap(it.id + "/name", function () { escRef.current = false; setEditG(cfg.id); });
+              dblTap((nested ? tokSelf : it.id) + "/name", function () { escRef.current = false; setEditG(cfg.id); });
               return;
             }
+            if (nested) { dblTap("out/" + tokSelf, pullOut); return; }
             dblTap(it.id, function () { toggleMax(it.id); });
           }
         },
@@ -2608,18 +2904,18 @@
                 }
               })
             : h("span", { className: "kg-gname", title: "双击改名" }, cfg.name),
-          h("span", { className: "kg-gn" }, it.members.length),
-          h("span", { className: "kg-gmem" }, it.members.map(function (m) { return m.name; }).join(" · ")),
+          h("span", { className: "kg-gn" }, (it.children || []).length),
+          h("span", { className: "kg-gmem" }, (it.children || []).map(nest.kidName).join(" · ")),
           h("button", {
             className: "kg-gauto", type: "button",
-            title: "自动排列：有任务块的卡片放大 · 无任务块的卡片缩小",
+            title: "自动排列：整棵子树归位（含嵌套子组）",
             onPointerDown: function (e) { e.stopPropagation(); },
-            onClick: function (e) { e.stopPropagation(); autoArrangeCard(cfg.id, it.id); }
+            onClick: function (e) { e.stopPropagation(); autoArrangeCard(cfg.id, nested ? tokSelf : it.id); }
           }, "自动排列"),
           h("button", {
-            className: "kg-gx", type: "button", title: "解散分组",
+            className: "kg-gx", type: "button", title: nested ? "移出父组" : "解散分组",
             onPointerDown: function (e) { e.stopPropagation(); },
-            onClick: function (e) { e.stopPropagation(); dissolve(cfg.id); }
+            onClick: function (e) { e.stopPropagation(); if (nested) pullOut(); else dissolve(cfg.id); }
           }, "×")
         ),
         h("div", {
@@ -2628,9 +2924,46 @@
         }, (gridOn && activeOp && activeOp.gid === cfg.id) ? h("div", { className: "kg-grid" }) : null, mem),
         h("div", {
           className: "kg-prsz", title: "拖动缩放",
-          onPointerDown: function (e) { opDown("resize", it.id, e, "top"); }
+          onPointerDown: function (e) {
+            if (nested) opDown("resize", tokSelf, e, "inner", parentGid);
+            else opDown("resize", it.id, e, "top");
+          }
         })
       );
+    }
+
+    // an all-filtered-out nested group shrinks to a strip INSIDE its parent
+    // body (mirrors the wall shelf at level depth) — drag it out to restore
+    function renderGroupStrip(node, r, parentGid) {
+      var tok = GTOK + node.cfg.id;
+      var isAct = activeOp && activeOp.id === tok && activeOp.gid === parentGid;
+      function pullOut() {
+        var a = nestAbsRef.current[node.cfg.id] || { x: r.x, y: r.y, w: GMIN_W, h: GMIN_H };
+        var obs = items.map(function (x) { return view[x.id]; }).filter(Boolean);
+        extractGroup(node.cfg.id, nearestFree(
+          { x: Math.max(0, a.x), y: Math.max(0, a.y), w: Math.max(GMIN_W, a.w), h: GMIN_H },
+          obs, GRID, 80));
+      }
+      return h("div", {
+        key: parentGid + "/" + tok,
+        className: "kg-panel kg-pstrip kg-gstrip" + (isAct ? " kg-pactive" : ""),
+        "data-group": node.cfg.id, "data-prof": tok, "data-in-group": parentGid,
+        style: { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" }
+      },
+        h("div", {
+          className: "kg-phead", title: "空分组 · 拖出父组恢复 · 双击移出",
+          onPointerDown: function (e) { opDown("move", tok, e, "inner", parentGid); },
+          onPointerUp: function () { dblTap("out/" + tok, pullOut); }
+        },
+          h("span", { className: "kg-gdot" }, "组"),
+          h("span", { className: "kg-ptitle" }, node.cfg.name),
+          h("span", { className: "kg-pcount" }, nest.collectProfs(node.children).length),
+          h("button", {
+            className: "kg-pclose", title: "移出父组", type: "button",
+            onPointerDown: function (e) { e.stopPropagation(); },
+            onClick: function (e) { e.stopPropagation(); pullOut(); }
+          }, "×")
+        ));
     }
 
     var cardEls = [];
@@ -2891,6 +3224,9 @@
     groupByProfile: groupByProfile, mergeGraphs: mergeGraphs, buildPanels: buildPanels,
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
     rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
+    shelfRows: shelfRows, stripW: stripW,
+    GTOK: GTOK, isTok: isTok, tokGid: tokGid, NEST_MAX: NEST_MAX,
+    sanitizeGroups: sanitizeGroups, groupSubtreeHas: groupSubtreeHas,
     STRIP_MIN_W: STRIP_MIN_W, STRIP_VGAP: STRIP_VGAP,
     PDEF_W: PDEF_W, PDEF_H: PDEF_H, PMIN_W: PMIN_W, PMIN_H: PMIN_H,
     snapMove: snapMove, snapResize: snapResize, crossPath: crossPath, overlaps: overlaps,

@@ -431,3 +431,18 @@
 .kg-mtt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kg-mst { flex: 0 0 auto; }
 .kg-mnote { font-size: 12px; opacity: .6; padding: 6px 0; }
+
+/* ── v12 nesting + compact shelf ─────────────────────────────── */
+/* nested group card inside a parent body */
+.kg-group.kg-gnest { border-left: 3px solid rgba(130, 160, 255, .45); }
+.kg-ghead.kg-ghead-n { font-size: 11px; gap: 5px; padding: 0 3px 0 7px; }
+.kg-ghead-n .kg-gname { font-size: 11px; }
+.kg-ghead-n .kg-gmem { display: none; }
+/* "组" chip on a collapsed nested group strip */
+.kg-gdot {
+  flex: 0 0 auto; width: 15px; height: 15px; line-height: 15px;
+  border-radius: 4px; background: rgba(130, 160, 255, .22); color: #9db4ff;
+  font-size: 9.5px; text-align: center;
+}
+/* content-width shelf strips: no room for the arrange button when narrow */
+.kg-panel.kg-pstrip.kg-pnarrow .kg-pauto { display: none; }
