@@ -18,6 +18,7 @@ draggable wall.
 | **Dependency DAG** | Tasks are laid out on a lattice by topological depth; `parent → child` edges are drawn orthogonally, cycle-broken edges dashed. |
 | **Multi-profile wall** 多 Profile 大屏 | One card per `assignee`. Drag, resize, magnet-snap to neighbours and to the 8 px lattice. Overlaps are resolved automatically (卡片互相排开). |
 | **Card order** 卡片排序 | Cards that still draw task blocks come first, then by profile name (numeric suffixes compare numerically, unassigned last). Auto-arrange tiles in this order, so the busy profiles land top-left; a card whose blocks are all filtered out by the status legend sinks to the back. |
+| **Auto-arrange engine** 自动排列 v11 | Top-bar 自动排列 and the default layout: cards holding task blocks tile row-first (fill a row before wrapping) and their height auto-fits so the busy wall stays on one screen; collapsed empty cards gather into one compact shelf directly beneath, stretched to neat full-width rows. |
 | **Groups** 分组 | Drop a card onto another to form a group; members are tiled inside. Double-click the group title to rename in place. |
 | **Content-aware layout** 按内容排布 | Members that hold task blocks get a bigger share of the group body, empty ones shrink. |
 | **自动排列 per card** | A button on every card: put its task blocks back on the lattice, resize the card to its content, and (for a group) re-run the weighted layout. |
