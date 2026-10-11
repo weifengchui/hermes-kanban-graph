@@ -1,0 +1,3 @@
+name: kanban-graph
+version: "1.0.0"
+description: "Board+ — a multi-profile Kanban dependency wall for the Hermes dashboard (dashboard-only plugin: no tools, no hooks, nothing runs until you open the page)."

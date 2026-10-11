@@ -37,15 +37,28 @@ Everything lives in `localStorage`, nothing leaves your machine.
 Requirements: Hermes Agent with the dashboard (`hermes dashboard`), and the
 `hermes_cli.kanban_db` module (ships with Hermes).
 
+**Option 1 — let Hermes install it (default profile):**
+
 ```bash
-# from the repo root
-./install.sh                 # installs into the default profile
-./install.sh liteguard       # or into a named profile
+hermes plugins install weifengchui/hermes-kanban-graph
 ```
 
-`install.sh` copies `manifest.json`, `plugin_api.py` and `dist/` into
-`~/.hermes/profiles/<profile>/plugins/kanban-graph/dashboard/` (or
-`~/.hermes/plugins/kanban-graph/dashboard/` for the default profile).
+One command: the repo is laid out exactly the way the plugin loader wants it
+(`dashboard/manifest.json` + `dashboard/dist/` + `dashboard/plugin_api.py`),
+so the clone lands as `~/.hermes/plugins/kanban-graph/dashboard/`.
+`hermes plugins update kanban-graph` pulls later commits, `hermes plugins remove kanban-graph` uninstalls.
+
+**Option 2 — `install.sh` (named profile / offline checkout):**
+
+```bash
+# from the repo root
+./install.sh                 # -> ~/.hermes/plugins/kanban-graph/dashboard/
+./install.sh liteguard       # -> ~/.hermes/profiles/liteguard/plugins/kanban-graph/dashboard/
+HERMES_HOME=/x ./install.sh   # custom Hermes home
+```
+
+`install.sh` copies the four payload files from `dashboard/` into the target
+profile. Both options write the same layout.
 
 Then restart the dashboard so the Python API + the manifest label are loaded:
 
@@ -57,8 +70,27 @@ hermes dashboard --no-open --port 9119
 Open `http://127.0.0.1:9119/kanban-graph` (a **Board+** tab appears next to Kanban). The JS/CSS are read from disk on every request, so front-end edits only
 need a browser reload — only `plugin_api.py` needs the restart.
 
-Manual install is the same three paths, no build step: the front-end is a plain
+Manual install is the same four files, no build step: the front-end is a plain
 script (`window.__HERMES_PLUGINS__.register(...)`), no bundler, no npm.
+
+### Repo layout · 仓库结构
+
+```
+hermes-kanban-graph/
+├── plugin.yaml            # plugin manifest (name/version) — makes `hermes plugins install` name it kanban-graph
+├── dashboard/             # ← the plugin payload, exactly what gets installed
+│   ├── manifest.json      # tab config, icon, entry/css/api paths (relative to dashboard/)
+│   ├── dist/index.js      # pre-built front-end bundle (IIFE, no bundler)
+│   ├── dist/style.css
+│   └── plugin_api.py      # FastAPI router → GET /api/plugins/kanban-graph/{boards,graph,task}
+├── install.sh             # manual installer (copies dashboard/*)
+├── tools/demo_shots.py    # regenerates screenshots/ against synthetic data
+└── screenshots/
+```
+
+The `dashboard/` subdirectory is not cosmetic — the loader only discovers
+`<plugin>/dashboard/manifest.json`, so a repo whose manifest sits at the root
+clones successfully and then shows up nowhere.
 
 ---
 
@@ -114,7 +146,7 @@ All three open the board SQLite file read-only (`file:…?mode=ro`).
 
 ## Layout knobs
 
-`dist/index.js`, top of the file:
+`dashboard/dist/index.js`, top of the file:
 
 ```js
 var GRID = 8, SNAP = 8;                       // lattice + magnet tolerance
