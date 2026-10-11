@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the 依赖大屏 (kanban-graph) dashboard plugin into a Hermes profile.
+# Install the Board+ (kanban-graph) dashboard plugin into a Hermes profile.
 #
 #   ./install.sh                 -> default profile   (~/.hermes/plugins/…)
 #   ./install.sh <profile>       -> named profile     (~/.hermes/profiles/<p>/plugins/…)

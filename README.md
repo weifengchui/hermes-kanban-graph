@@ -1,10 +1,10 @@
-# hermes-kanban-graph — **Board+**（任务依赖大屏）
+# hermes-kanban-graph — **Board+**
 
 A dashboard plugin for **Hermes Agent**: every Kanban task as a block, every
 `parent → child` dependency as a wire, one card per profile, all on a single
 draggable wall.
 
-插件名 `Board+`（左侧 tab 就叫这个名字）。Hermes 的仪表盘插件：把 Kanban 任务画成方块、把 `父 → 子` 依赖画成连线，每个 profile 一张卡片，
+插件名就叫 `Board+`（中英文都是它，左侧 tab 也是这个名字）。Hermes 的仪表盘插件：把 Kanban 任务画成方块、把 `父 → 子` 依赖画成连线，每个 profile 一张卡片，
 全部铺在一面可拖动的大屏上。
 
 ![wall](screenshots/01-wall.png)
