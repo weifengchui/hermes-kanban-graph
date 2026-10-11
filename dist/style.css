@@ -1,0 +1,432 @@
+/* kanban-graph dashboard plugin */
+.kg-root {
+  /* host tab container may have auto height — pin to viewport so the
+     canvas actually fills the page and fitView can center inside it */
+  height: calc(100dvh - 96px);
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  color: var(--color-foreground, #e5e7eb);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.kg-top {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+}
+.kg-brand { font-weight: 600; opacity: .85; margin-right: 2px; }
+.kg-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.kg-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: .9;
+}
+.kg-meta { opacity: .65; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.kg-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+.kg-canvas:active { cursor: grabbing; }
+
+.kg-svg {
+  display: block;
+  overflow: visible;
+  color: var(--color-foreground, #e5e7eb);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.kg-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  opacity: .55;
+}
+
+/* status palette */
+.kg-s-triage    { --kg-color: #9ca3af; color: #9ca3af; }
+.kg-s-todo      { --kg-color: #6b7280; color: #6b7280; }
+.kg-s-scheduled { --kg-color: #8b5cf6; color: #8b5cf6; }
+.kg-s-ready     { --kg-color: #3b82f6; color: #3b82f6; }
+.kg-s-running   { --kg-color: #06b6d4; color: #06b6d4; }
+.kg-s-blocked   { --kg-color: #ef4444; color: #ef4444; }
+.kg-s-review    { --kg-color: #f59e0b; color: #f59e0b; }
+.kg-s-done      { --kg-color: #10b981; color: #10b981; }
+.kg-s-cancelled { --kg-color: #a1a1aa; color: #a1a1aa; }
+.kg-s-cancelled .kg-title { text-decoration: line-through; opacity: .7; }
+.kg-s-archived  { --kg-color: #9ca3af; color: #9ca3af; }
+
+/* nodes */
+.kg-node { cursor: grab; transition: opacity 150ms ease; }
+.kg-node.kg-ndrag { cursor: grabbing; }
+.kg-node.kg-ndrag .kg-box { stroke-width: 2.4; fill-opacity: .22; }
+.kg-node .kg-box {
+  fill: var(--kg-color, #6b7280);
+  fill-opacity: .12;
+  stroke: var(--kg-color, #6b7280);
+  stroke-width: 1.4;
+}
+.kg-node .kg-bar { fill: var(--kg-color, #6b7280); }
+.kg-node .kg-title { font-size: 12.5px; font-weight: 600; fill: var(--color-foreground, #e5e7eb); }
+.kg-node .kg-asg { font-size: 11px; opacity: .7; fill: var(--color-muted-foreground, #9ca3af); }
+.kg-node .kg-st { font-size: 10.5px; font-weight: 600; fill: var(--kg-color, #6b7280); }
+.kg-ulhdr { font-size: 11px; fill: var(--color-muted-foreground, #9ca3af); }
+.kg-node.kg-sel .kg-box { stroke-width: 2.6; }
+.kg-node.kg-s-done { opacity: .6; }
+.kg-node.kg-dim { opacity: .18; }
+
+/* running nodes: a glowing light streak circling the border (crisp head +
+   blurred tail, pathLength=100 so dash math is perimeter-independent) */
+@keyframes kg-dash { to { stroke-dashoffset: -100; } }
+.kg-node .kg-comet, .kg-node .kg-comet-tail {
+  fill: none;
+  stroke: var(--kg-color, #06b6d4);
+  pointer-events: none;
+  animation: kg-dash 3s linear infinite;
+}
+.kg-node .kg-comet { stroke-width: 3; stroke-linecap: round; stroke-dasharray: 8 92; filter: drop-shadow(0 0 4px var(--kg-color, #06b6d4)); }
+/* tail: butt-capped short dash, heavily blurred & faint => reads as decay, not a cap */
+.kg-node .kg-comet-tail { stroke-width: 2.4; stroke-linecap: butt; stroke-dasharray: 13 87; opacity: .2; filter: blur(2.2px); animation-delay: .375s; }
+@media (prefers-reduced-motion: reduce) {
+  .kg-node .kg-comet, .kg-node .kg-comet-tail { animation: none; opacity: 0; }
+}
+
+/* edges */
+.kg-edge {
+  fill: none;
+  stroke: currentColor;
+  stroke-opacity: .45;
+  stroke-width: 1.4;
+  transition: opacity 150ms ease;
+}
+.kg-edge.kg-back {
+  stroke: #ef4444;
+  stroke-opacity: .8;
+  stroke-dasharray: 6 4;
+}
+.kg-arrow { fill: currentColor; opacity: .6; }
+/* dimmed by selection highlight (kept after status rules so it wins) */
+.kg-dim { opacity: .18; transition: opacity 150ms ease; }
+
+/* unlinked tasks: same blocks on canvas, slightly lighter */
+.kg-node.kg-uln .kg-box { fill-opacity: .08; stroke-opacity: .75; }
+
+/* status chips are toggle buttons: dashed + dim = that status is hidden */
+.kg-chip-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  background: transparent;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  cursor: pointer;
+  transition: opacity 150ms ease;
+}
+.kg-chip-btn:hover { opacity: 1; }
+.kg-chip.kg-chip-off { opacity: .35; border-style: dashed; }
+.kg-chip.kg-chip-off:hover { opacity: .55; }
+.kg-chip-btn .kg-pdot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
+
+/* ── view switch (多 Profile / 单板) ── */
+.kg-mode { display: inline-flex; gap: 4px; }
+
+/* ── multi-profile wall ── */
+.kg-board {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.kg-surface { position: relative; min-width: 100%; }
+
+.kg-overlay { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 1; overflow: visible; }
+.kg-xedge { fill: none; stroke-width: 1.2; stroke-dasharray: 5 4; opacity: .45; }
+.kg-xedge.kg-xback { stroke-dasharray: 3 3; opacity: .6; }
+
+.kg-guide { position: absolute; z-index: 8; pointer-events: none; background: #22d3ee; opacity: .5; }
+.kg-guide-v { width: 1px; top: 0; bottom: 0; }
+.kg-guide-h { height: 1px; left: 0; right: 0; }
+
+.kg-panel {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--color-card, rgba(255, 255, 255, .03));
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .12));
+  border-top-width: 2px;
+  border-radius: 10px;
+  overflow: hidden;
+  transition: box-shadow 120ms ease;
+}
+.kg-panel:hover { box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
+.kg-panel.kg-pactive { z-index: 7; box-shadow: 0 10px 26px rgba(0, 0, 0, .5); }
+
+.kg-phead {
+  flex: 0 0 auto;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 8px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, .10));
+  background: rgba(255, 255, 255, .035);
+}
+.kg-phead:active { cursor: grabbing; }
+.kg-ptitle { font-weight: 600; font-size: 12px; white-space: nowrap; }
+.kg-pcount { font-size: 11px; opacity: .55; font-variant-numeric: tabular-nums; }
+.kg-pdots { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; overflow: hidden; }
+.kg-pmini { font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kg-plink {
+  font-size: 10.5px;
+  opacity: .75;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .14));
+  border-radius: 999px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+.kg-pclose {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  margin: 0;
+  color: inherit;
+  opacity: .4;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.kg-pclose:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
+
+.kg-pbody { position: relative; flex: 1 1 auto; min-height: 0; display: flex; overflow: auto; }
+.kg-pfit { margin: auto; }
+.kg-mini { display: block; overflow: visible; color: var(--color-foreground, #e5e7eb); user-select: none; -webkit-user-select: none; }
+.kg-mini .kg-title { font-size: 10px; }
+.kg-mini .kg-asg { font-size: 9px; }
+.kg-mini .kg-st { font-size: 8.8px; }
+.kg-mini .kg-ulhdr { font-size: 9px; }
+
+.kg-pempty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: .45;
+  font-size: 11.5px;
+}
+
+.kg-prsz { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; touch-action: none; z-index: 3; }
+.kg-prsz::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: .35;
+}
+.kg-panel:hover .kg-prsz::after { opacity: .8; }
+
+/* ── group container card ── */
+.kg-group {
+  position: absolute;
+  z-index: 2;
+  border: 1px dashed var(--color-border, rgba(255, 255, 255, .22));
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .022);
+  overflow: visible; /* a member must stay visible while being dragged out */
+  transition: box-shadow 120ms ease, border-color 120ms ease;
+}
+.kg-group:hover { border-color: rgba(255, 255, 255, .34); }
+.kg-group.kg-pactive { box-shadow: 0 8px 24px rgba(0, 0, 0, .45); }
+.kg-ghead {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 0 9px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, .09));
+  background: rgba(255, 255, 255, .03);
+  border-radius: 11px 11px 0 0;
+}
+.kg-ghead:active { cursor: grabbing; }
+.kg-gname { font-weight: 600; font-size: 12px; white-space: nowrap; }
+.kg-gn { opacity: .5; font-variant-numeric: tabular-nums; }
+.kg-gmem { opacity: .38; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.kg-gx {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  margin: 0;
+  color: inherit;
+  opacity: .4;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.kg-gx:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
+.kg-gbody { position: absolute; }
+.kg-gbody > .kg-panel { z-index: 3; }
+
+/* a card that lives inside a group is a touch denser */
+.kg-panel.kg-pinner { border-radius: 8px; }
+.kg-panel.kg-pinner .kg-phead { height: 24px; padding: 0 4px 0 7px; gap: 5px; }
+.kg-panel.kg-pinner .kg-ptitle { font-size: 11.5px; }
+.kg-panel.kg-pinner .kg-pmini { font-size: 10px; }
+
+/* double-clicked card owns the wall */
+.kg-panel.kg-pbig, .kg-group.kg-gbig { box-shadow: 0 16px 44px rgba(0, 0, 0, .55); }
+
+.kg-pfit.kg-grabbing { cursor: grabbing; }
+.kg-mini .kg-node { cursor: grab; }
+
+/* api provider / model chip on a task block (chip text + pill are svg nodes) */
+.kg-node .kg-mtag { font-size: 9.5px; font-weight: 600; } /* ★ sync with cf in renderNode */
+.kg-node .kg-mpill { pointer-events: none; }
+.kg-mini .kg-mtag { font-size: 8px; }
+
+/* in-place group rename ("分组 1" -> typed value, Enter saves) */
+.kg-gname-edit {
+  -webkit-appearance: none;
+  appearance: none;
+  font: inherit;
+  font-weight: 600;
+  font-size: 12px;
+  color: inherit;
+  background: rgba(0, 0, 0, .42);
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .3));
+  border-radius: 4px;
+  padding: 0 4px;
+  height: 19px;
+  width: 104px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.kg-gname-edit:focus { border-color: rgba(255, 255, 255, .52); }
+
+/* ── per-card 自动排列 (head bar, beside ×) ── */
+.kg-pauto, .kg-gauto {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .16));
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: .42;
+  transition: opacity 120ms ease;
+}
+.kg-panel:hover .kg-pauto, .kg-group:hover .kg-gauto { opacity: .9; }
+.kg-pauto:hover, .kg-gauto:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
+
+/* ── drag reference grid: visible only while a card / node is being dragged ── */
+.kg-grid {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, .085) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, .085) 1px, transparent 1px),
+    linear-gradient(to right, rgba(255, 255, 255, .035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, .035) 1px, transparent 1px);
+  background-size: 40px 40px, 40px 40px, 8px 8px, 8px 8px;
+}
+.kg-grid-lattice { background-position: 0 0, 0 0; }
+
+/* ── task detail popup ── */
+.kg-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(0, 0, 0, .55);
+}
+.kg-mbox {
+  width: min(780px, 100%);
+  max-height: min(80vh, 760px);
+  overflow: auto;
+  padding: 13px 16px 16px;
+  background: var(--color-card, #16181d);
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .16));
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+}
+.kg-mhead { display: flex; align-items: flex-start; gap: 8px; }
+.kg-mdot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; }
+.kg-mtitle { flex: 1 1 auto; font-size: 14px; font-weight: 600; line-height: 1.35; word-break: break-word; }
+.kg-mx {
+  -webkit-appearance: none; appearance: none;
+  flex: 0 0 auto; background: transparent; border: 0; margin: 0;
+  color: inherit; opacity: .45; cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 6px; border-radius: 4px;
+}
+.kg-mx:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
+.kg-mmeta { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 4px; }
+.kg-mrows { margin-top: 6px; }
+.kg-mrow { display: flex; gap: 8px; font-size: 12px; line-height: 1.75; }
+.kg-mk { flex: 0 0 72px; opacity: .5; }
+.kg-mv { flex: 1 1 auto; word-break: break-word; }
+.kg-msec { margin-top: 12px; }
+.kg-msec > h4 { margin: 0 0 5px; font-size: 11px; font-weight: 600; letter-spacing: .04em; opacity: .55; }
+.kg-mtxt {
+  font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  opacity: .9; max-height: 240px; overflow: auto;
+  background: rgba(255, 255, 255, .028); border-radius: 6px; padding: 7px 9px;
+}
+.kg-mtxt.kg-msub { max-height: 140px; margin-top: 2px; }
+.kg-mitem { display: flex; gap: 7px; align-items: baseline; font-size: 12px; line-height: 1.75; }
+.kg-mrun { margin-bottom: 6px; }
+.kg-mid { flex: 0 0 auto; opacity: .55; font-variant-numeric: tabular-nums; }
+.kg-mtt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kg-mst { flex: 0 0 auto; }
+.kg-mnote { font-size: 12px; opacity: .6; padding: 6px 0; }

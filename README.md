@@ -1,0 +1,147 @@
+# hermes-kanban-graph — 依赖大屏
+
+A dashboard plugin for **Hermes Agent**: every Kanban task as a block, every
+`parent → child` dependency as a wire, one card per profile, all on a single
+draggable wall.
+
+Hermes 的仪表盘插件：把 Kanban 任务画成方块、把 `父 → 子` 依赖画成连线，每个 profile 一张卡片，
+全部铺在一面可拖动的大屏上。
+
+![wall](screenshots/01-wall.png)
+
+---
+
+## What it does · 功能
+
+| | |
+|---|---|
+| **Dependency DAG** | Tasks are laid out on a lattice by topological depth; `parent → child` edges are drawn orthogonally, cycle-broken edges dashed. |
+| **Multi-profile wall** 多 Profile 大屏 | One card per `assignee`. Drag, resize, magnet-snap to neighbours and to the 8 px lattice. Overlaps are resolved automatically (卡片互相排开). |
+| **Groups** 分组 | Drop a card onto another to form a group; members are tiled inside. Double-click the group title to rename in place. |
+| **Content-aware layout** 按内容排布 | Members that hold task blocks get a bigger share of the group body, empty ones shrink. |
+| **自动排列 per card** | A button on every card: put its task blocks back on the lattice, resize the card to its content, and (for a group) re-run the weighted layout. |
+| **Task detail popup** 任务详情 | Double-click any task block for status, assignee, model, timings, description, dependencies, recent runs, comments and events. |
+| **Drag reference grid** 参考格子 | While you drag, an 8 px / 40 px grid appears so drops land tidy; toggle it off with 网格. |
+| **Status filter** | Per-status chips hide whole statuses (persisted). |
+| **Maximise** | Double-click a card's header to blow it up over the wall. |
+| **Single-board view** 单板 | The full DAG for one board with pan / zoom / drag-to-place nodes. |
+
+Everything lives in `localStorage`, nothing leaves your machine.
+所有布局状态只写本机 `localStorage`，插件本身不联网。
+
+---
+
+## Install · 安装
+
+Requirements: Hermes Agent with the dashboard (`hermes dashboard`), and the
+`hermes_cli.kanban_db` module (ships with Hermes).
+
+```bash
+# from the repo root
+./install.sh                 # installs into the default profile
+./install.sh liteguard       # or into a named profile
+```
+
+`install.sh` copies `manifest.json`, `plugin_api.py` and `dist/` into
+`~/.hermes/profiles/<profile>/plugins/kanban-graph/dashboard/` (or
+`~/.hermes/plugins/kanban-graph/dashboard/` for the default profile).
+
+Then restart the dashboard so the Python API is loaded:
+
+```bash
+hermes dashboard --stop
+hermes dashboard --no-open --port 9119
+```
+
+Open `http://127.0.0.1:9119/kanban-graph` (a **依赖大屏** tab appears next to
+Kanban). The JS/CSS are read from disk on every request, so front-end edits only
+need a browser reload — only `plugin_api.py` needs the restart.
+
+Manual install is the same three paths, no build step: the front-end is a plain
+script (`window.__HERMES_PLUGINS__.register(...)`), no bundler, no npm.
+
+---
+
+## Interactions · 操作
+
+| gesture | effect |
+|---|---|
+| drag a card header | move it (magnet to neighbours + 8 px grid) |
+| drag the bottom-right grip | resize (bottom-right only; origin stays put) |
+| drop a card onto another | form a group |
+| drag a member inside a group | move it inside the card |
+| double-click a card header | maximise / restore |
+| double-click a task block | task detail popup (`Esc` or the backdrop closes it) |
+| double-click a group title | rename in place (`Enter` saves, `Esc` cancels) |
+| drag a task block inside a card | rearrange that profile's blocks |
+| click 自动排列 on a card | tidy that card |
+| click 网格 | show/hide the drag reference grid |
+
+---
+
+## Screenshots
+
+| | |
+|---|---|
+| ![groups](screenshots/02-groups.png) | grouped, weighted by content |
+| ![drag grid](screenshots/03-drag-grid.png) | reference grid while dragging |
+| ![task popup](screenshots/04-task-popup.png) | task detail popup |
+| ![single](screenshots/05-single-board.png) | single-board DAG |
+
+Regenerate them against **synthetic** data (no real board is read):
+
+```bash
+python tools/demo_shots.py        # needs the dashboard on :9119
+```
+
+---
+
+## API
+
+The plugin adds three read-only routes under
+`/api/plugins/kanban-graph/` (registered by `plugin_api.py`):
+
+| route | returns |
+|---|---|
+| `GET /boards` | `{current, boards:[{slug,title}]}` |
+| `GET /graph?board=<slug>` | `{board, nodes, edges, back_edges}` — nodes carry `tag` / `tagFull` / `tagColor`, the provider · model chip derived from that profile's config |
+| `GET /task?board=<slug>&id=<task>` | one task in full + parents/children/comments/events/runs |
+
+All three open the board SQLite file read-only (`file:…?mode=ro`).
+
+---
+
+## Layout knobs
+
+`dist/index.js`, top of the file:
+
+```js
+var GRID = 8, SNAP = 8;                       // lattice + magnet tolerance
+var PMIN_W = 240, PMIN_H = 150;               // a free card's minimums
+var PDEF_W = 460, PDEF_H = 330;               // its "one unit of content" size
+var GMIN_W = 320, GMIN_H = 230, GHEAD = 30;   // group card chrome
+var IMIN_W = 180, IMIN_H = 108;               // an inner member's minimums
+var PROF_W_EMPTY = 1, PROF_W_BUSY = 3;        // content weight: empty … busy
+```
+
+`PROF_W_EMPTY`/`PROF_W_BUSY` drive the content-aware group layout
+(`profWeight` → `weightedSlots`, a squarified treemap).
+
+---
+
+## Tests
+
+The acceptance harness lives outside this repo (it drives the live dashboard
+with Playwright). The pure geometry is exposed on `window.__KG_TEST__` so it can
+be unit-tested without a DOM:
+
+```js
+window.__KG_TEST__.snapMove / snapResize / innerLayout / weightedSlots /
+profWeight / squarifyRects / tileRects / groupByProfile / buildPanels …
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
