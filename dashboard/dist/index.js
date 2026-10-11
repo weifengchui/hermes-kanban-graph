@@ -72,6 +72,7 @@
   // group cards + maximised cards
   var GMIN_W = 320, GMIN_H = 230, GHEAD = 30, GBODY_PAD = 8, INNER_PAD = 6;
   var STRIP_H = 32, STRIP_H_IN = 28; // a collapsed card is just its title row (border 2 + head 28/24 + hairline 1 + border 1)
+  var STRIP_MIN_W = 260, STRIP_VGAP = 8; // v11 shelf: strips stretch to fill a row (min width) with a tighter row pitch
   var IMIN_W = 180, IMIN_H = 108; // an inner (grouped) card may be smaller than a free one
   var MINI_SCALE_MAX_BIG = 2.4; // a maximised card may blow its mini graph up further
 
@@ -221,7 +222,12 @@
   function profLabel(name) { return name ? name : "未指派"; }
 
   // ─────────────────────────── text metrics ───────────────────────────
-  function charW(ch) { var c = ch.charCodeAt(0); return (c > 0x2e7f || c >= 0xff00) ? 2 : 1; }
+  // 1 unit = 0.55 em (see textPx). Latin at font-weight 600 measures ~0.62-0.65
+  // em per char on average (m/w/caps/._- are wide), so plain 1.0 under-budgeted
+  // and long path-like titles overflowed the node box (measured 105% fill).
+  // 1.15 brings worst-case Latin titles back to ~91%. CJK keeps 2 (1.1em vs
+  // real 1.0em — the pre-existing conservative headroom).
+  function charW(ch) { var c = ch.charCodeAt(0); return (c > 0x2e7f || c >= 0xff00) ? 2 : 1.15; }
   function isLatin(ch) { return /[A-Za-z0-9._-]/.test(ch); }
   function takeUnits(s, max) {
     var u = 0, i = 0;
@@ -739,6 +745,64 @@
     return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
   }
 
+  // v11 (user 2026-10-11): ROW-FIRST packing for 自动排列. tileRects above
+  // balances columns via sqrt and stretches rows to fill the canvas height,
+  // so two busy cards sat one per row and the strip shelf fell off-screen.
+  // rowPack fills as many cards into a row as fit at minW, wraps only when the
+  // row is full, and keeps every row at a fixed comfortable cardH.
+  function rowPack(n, W, minW, cardH, gap) {
+    var out = [];
+    if (n <= 0) return out;
+    gap = gap || PGAP; minW = minW || PDEF_W; cardH = cardH || PDEF_H;
+    var cols = Math.max(1, Math.min(n, Math.floor((W + gap) / (minW + gap))));
+    var w = Math.floor((W - (cols + 1) * gap) / cols);
+    for (var i = 0; i < n; i++) {
+      out.push({ x: gap + (i % cols) * (w + gap), y: gap + Math.floor(i / cols) * (cardH + gap), w: w, h: cardH });
+    }
+    return out;
+  }
+
+  // v11: the collapsed-shelf counterpart — title-row strips stretch to fill a
+  // row (min width STRIP_MIN_W) below y0 with a tighter vertical pitch, so the
+  // empty cards sit together instead of scattering through the busy grid.
+  function shelfPack(n, W, y0, minW, stripH, gap, vgap) {
+    var out = [];
+    if (n <= 0) return out;
+    gap = gap || PGAP; minW = minW || STRIP_MIN_W; stripH = stripH || STRIP_H;
+    vgap = vgap == null ? STRIP_VGAP : vgap;
+    var cols = Math.max(1, Math.floor((W + gap) / (minW + gap)));
+    var w = Math.floor((W - (cols + 1) * gap) / cols);
+    for (var i = 0; i < n; i++) {
+      out.push({ x: gap + (i % cols) * (w + gap), y: y0 + Math.floor(i / cols) * (stripH + vgap), w: w, h: stripH });
+    }
+    return out;
+  }
+
+  // v11.1: one plan for the whole wall (top 自动排列 + the unstored default
+  // slots). Busy cards pack row-first at a comfortable height, but when the
+  // viewport is shorter than rows*PDEF_H + the strip shelf, the cards shrink
+  // toward PMIN_H so the wall keeps fitting without scrolling where it can.
+  function wallPlan(W, H, nFull, nSlim) {
+    var cols = Math.max(1, Math.min(Math.max(1, nFull), Math.floor((W + PGAP) / (PDEF_W + PGAP))));
+    var rows = Math.ceil(nFull / cols);
+    var colsS = Math.max(1, Math.floor((W + PGAP) / (STRIP_MIN_W + PGAP)));
+    var shelfRows = Math.ceil(Math.max(0, nSlim) / colsS);
+    var shelfH = nSlim > 0 ? shelfRows * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + PGAP : 0;
+    var cardH = PDEF_H;
+    if (nFull > 0) {
+      var avail = H - (rows + 1) * PGAP - shelfH;
+      // never pack below the group-card minimum: cards can be merged into a
+      // group at any moment and the container floor is GMIN_H — slots under
+      // it would desync the union and break member avoidance (v11.1/v7 lesson)
+      cardH = Math.max(GMIN_H, Math.min(PDEF_H, Math.floor(avail / rows)));
+    }
+    var busy = rowPack(nFull, W, PDEF_W, cardH, PGAP);
+    var busyBottom = PGAP;
+    busy.forEach(function (r) { busyBottom = Math.max(busyBottom, r.y + r.h); });
+    var shelf = shelfPack(nSlim, W, busyBottom + PGAP, STRIP_MIN_W, STRIP_H, PGAP, STRIP_VGAP);
+    return { busy: busy, shelf: shelf, cardH: cardH, busyBottom: busyBottom };
+  }
+
   // First free slot on a stable PDEF-sized lattice; extends past the fold when
   // the visible canvas is full.
   function pickFreeSlot(placed, W, H) {
@@ -766,7 +830,11 @@
   function axisTargets(rects, canvas, axis) {
     var t = [];
     for (var i = 0; i < rects.length; i++) {
-      var r = rects[i];
+      // callers pass either bare rects or {id, rect} wrappers (othersOf);
+      // reading through the wrapper used to yield NaN and SILENTLY drop every
+      // neighbour candidate — the magnet then only saw canvas edges (v11 found
+      // this when a row-first gap of 6.5px beat a neighbour edge of 1px)
+      var r = rects[i] && rects[i].rect ? rects[i].rect : rects[i];
       if (axis === "x") t.push(r.x, r.x + r.w / 2, r.x + r.w);
       else t.push(r.y, r.y + r.h / 2, r.y + r.h);
     }
@@ -1791,12 +1859,32 @@
     var rects = useMemo(function () {
       var base = {}, out = {}, claimed = [];
       Object.keys(layout).forEach(function (k) { if (layout[k]) base[k] = layout[k]; });
-      var slots = tileRects(items.length, csize.w, csize.h, PGAP);
+      // v11: the unstored default slots mirror 自动排列 — busy cards pack
+      // row-first on fixed-height rows, collapsed strips sit together on the
+      // shelf under the busy area (instead of holes where a strip shrank).
+      var slimIds = {};
+      items.forEach(function (it) {
+        if (it.kind !== "prof") return;
+        var pn = panels[it.prof.name];
+        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) slimIds[it.id] = 1;
+      });
+      var fulls = items.filter(function (it) { return !slimIds[it.id]; });
+      var strips = items.filter(function (it) { return !!slimIds[it.id]; });
+      var plan = wallPlan(csize.w, csize.h, fulls.length, strips.length);
+      var busySlots = plan.busy;
+      var busyBottom = plan.busyBottom;
+      fulls.forEach(function (it) {
+        if (!base[it.id]) return;
+        var rr = effRect(it.id, base[it.id]);
+        busyBottom = Math.max(busyBottom, rr.y + rr.h);
+      });
+      var shelfSlots = shelfPack(strips.length, csize.w, busyBottom + PGAP, STRIP_MIN_W, STRIP_H, PGAP, STRIP_VGAP);
       items.forEach(function (it) { if (base[it.id]) claimed.push(effRect(it.id, base[it.id])); });
       items.forEach(function (it) {
         if (base[it.id]) { out[it.id] = effRect(it.id, base[it.id]); return; }
+        var pool = slimIds[it.id] ? shelfSlots : busySlots;
         var cand = null, k;
-        for (k = 0; k < slots.length; k++) if (!hasOverlap(slots[k], claimed)) { cand = slots[k]; break; }
+        for (k = 0; k < pool.length; k++) if (!hasOverlap(pool[k], claimed)) { cand = pool[k]; break; }
         var rr = effRect(it.id, cand || pickFreeSlot(claimed, csize.w, csize.h));
         out[it.id] = rr;
         claimed.push(rr);
@@ -2305,22 +2393,21 @@
       });
       var full = items.filter(function (it) { return !slimSet[it.id]; });
       var slim = items.filter(function (it) { return slimSet[it.id]; });
-      var slots = tileRects(full.length, W, H, PGAP);
+      // v11: busy cards pack ROW-FIRST at a fixed comfortable height (they fill
+      // a row before wrapping and no longer stretch down the whole canvas), and
+      // collapsed strips sit together on a tight shelf directly under them —
+      // top of the view = cards with blocks, below = only title-row bars.
+      // v11.1: wallPlan shrinks card rows toward PMIN_H when the viewport is
+      // tight, so the busy area + shelf fit the screen where it can.
+      var plan = wallPlan(W, H, full.length, slim.length);
+      var slots = plan.busy;
       var nxt = Object.assign({}, layoutRef.current);
       var maxY = PGAP, i;
       full.forEach(function (it, i2) { if (slots[i2]) { nxt[it.id] = slots[i2]; maxY = Math.max(maxY, slots[i2].y + slots[i2].h); } });
-      // v10: collapsed cards pack into title-row bars below the tiled area —
       // stored h = STRIP_H, and effRect lifts it back to PMIN_H when the card
       // grows blocks again, so the persisted row never clips content.
-      var stripW = 300;
-      var colsS = Math.max(1, Math.floor((W - PGAP) / (stripW + PGAP)));
-      slim.forEach(function (it, i2) {
-        nxt[it.id] = {
-          x: PGAP + (i2 % colsS) * (stripW + PGAP),
-          y: maxY + PGAP + Math.floor(i2 / colsS) * (STRIP_H + PGAP),
-          w: stripW, h: STRIP_H
-        };
-      });
+      var shelf = shelfPack(slim.length, W, maxY + PGAP, STRIP_MIN_W, STRIP_H, PGAP, STRIP_VGAP);
+      slim.forEach(function (it, i2) { if (shelf[i2]) nxt[it.id] = shelf[i2]; });
       applyLayout(nxt);
       applyGroups(gcfgRef.current.map(function (c) { return { id: c.id, name: c.name, members: c.members, inner: {} }; }));
       if (maxed) { setMaxed(""); writeMaxed(keyRef.current, ""); }
@@ -2803,6 +2890,9 @@
     buildModel: buildModel, buildView: buildView, orthPath: orthPath, snapCell: snapCell,
     groupByProfile: groupByProfile, mergeGraphs: mergeGraphs, buildPanels: buildPanels,
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
+    rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
+    STRIP_MIN_W: STRIP_MIN_W, STRIP_VGAP: STRIP_VGAP,
+    PDEF_W: PDEF_W, PDEF_H: PDEF_H, PMIN_W: PMIN_W, PMIN_H: PMIN_H,
     snapMove: snapMove, snapResize: snapResize, crossPath: crossPath, overlaps: overlaps,
     unionRect: unionRect, groupBody: groupBody, clampInnerRect: clampInnerRect,
     innerLayout: innerLayout, nearestFree: nearestFree, pushAside: pushAside, insideRect: insideRect,
