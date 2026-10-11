@@ -588,7 +588,15 @@
 
   // Split a merged graph into one subgraph per profile (assignee) + the
   // cross-profile wires between them.
-  function groupByProfile(merged) {
+  // how many task blocks a card actually draws: a status hidden by the legend
+  // takes its blocks off the card, and a card with none left is an empty card
+  function blockCount(g, hideSt) {
+    var n = 0, i;
+    for (i = 0; i < g.nodes.length; i++) if (!(hideSt && hideSt[g.nodes[i].status])) n++;
+    return n;
+  }
+
+  function groupByProfile(merged, hideSt) {
     var nodes = (merged && merged.nodes) || [];
     var byK = {}, order = [], owner = {}, i;
     for (i = 0; i < nodes.length; i++) {
@@ -619,7 +627,11 @@
       return g;
     });
     groups.sort(function (a, b) {
-      // default order = by profile name; unassigned work is the catch-all: last
+      // cards that still draw task blocks come first (auto-arrange tiles in this
+      // order, so the busy profiles land in the top-left slots); then by profile
+      // name — numeric suffixes compare numerically, unassigned last
+      var ab = blockCount(a, hideSt) > 0, bb = blockCount(b, hideSt) > 0;
+      if (ab !== bb) return ab ? -1 : 1;
       if ((a.name === "") !== (b.name === "")) return a.name === "" ? 1 : -1;
       return String(a.name).localeCompare(String(b.name), "en", { numeric: true, sensitivity: "base" });
     });
@@ -1625,7 +1637,7 @@
 
     var slugs = useMemo(function () { return neededSlugs("multi", "", scope, boards); }, [scope, boards]);
     var merged = useMemo(function () { return mergeGraphs(graphs, slugs); }, [graphs, slugs]);
-    var grouped = useMemo(function () { return groupByProfile(merged); }, [merged]);
+    var grouped = useMemo(function () { return groupByProfile(merged, props.hideSt); }, [merged, props.hideSt]);
     var groups = grouped.groups;
     var panels = useMemo(function () { return buildPanels(groups, GEO_MINI); }, [groups]);
     var multiBoard = merged.multi;
@@ -2635,6 +2647,7 @@
     hasOverlap: hasOverlap, GKEY: GKEY,
     squarifyRects: squarifyRects, weightedSlots: weightedSlots, profWeight: profWeight,
     isDoubleTap: isDoubleTap, PROF_W_EMPTY: PROF_W_EMPTY, PROF_W_BUSY: PROF_W_BUSY,
+    blockCount: blockCount,
     freeSpot: freeSpot,
     GMIN_W: GMIN_W, GMIN_H: GMIN_H, GHEAD: GHEAD, GBODY_PAD: GBODY_PAD, INNER_PAD: INNER_PAD,
     IMIN_W: IMIN_W, IMIN_H: IMIN_H, GRID: GRID, PGAP: PGAP,
