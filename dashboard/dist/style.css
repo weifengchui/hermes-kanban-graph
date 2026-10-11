@@ -181,6 +181,7 @@
 }
 .kg-panel:hover { box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
 .kg-panel.kg-pactive { z-index: 7; box-shadow: 0 10px 26px rgba(0, 0, 0, .5); }
+.kg-panel.kg-pstrip .kg-phead { border-bottom: 0; }
 
 .kg-phead {
   flex: 0 0 auto;
@@ -226,7 +227,7 @@
 .kg-pclose:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
 
 .kg-pbody { position: relative; flex: 1 1 auto; min-height: 0; display: flex; overflow: auto; }
-.kg-pfit { margin: auto; }
+.kg-pfit { margin: 0; }
 .kg-mini { display: block; overflow: visible; color: var(--color-foreground, #e5e7eb); user-select: none; -webkit-user-select: none; }
 .kg-mini .kg-title { font-size: 10px; }
 .kg-mini .kg-asg { font-size: 9px; }

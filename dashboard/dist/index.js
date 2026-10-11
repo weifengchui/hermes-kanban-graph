@@ -71,6 +71,7 @@
   var GRID = 8, SNAP = 8, PMIN_W = 240, PMIN_H = 150, PDEF_W = 460, PDEF_H = 330, PGAP = 12, MINI_SCALE_MIN = 0.5, MINI_SCALE_MAX = 1.4;
   // group cards + maximised cards
   var GMIN_W = 320, GMIN_H = 230, GHEAD = 30, GBODY_PAD = 8, INNER_PAD = 6;
+  var STRIP_H = 32, STRIP_H_IN = 28; // a collapsed card is just its title row (border 2 + head 28/24 + hairline 1 + border 1)
   var IMIN_W = 180, IMIN_H = 108; // an inner (grouped) card may be smaller than a free one
   var MINI_SCALE_MAX_BIG = 2.4; // a maximised card may blow its mini graph up further
 
@@ -342,6 +343,33 @@
       e = backEdges[i];
       if (e.parent !== e.child && ids.has(e.parent) && ids.has(e.child)) bes.push(e);
     }
+    if (G.KTF) {
+      // v10 (user 2026-10-11): blocks inside a card go home sorted by STATUS_ORDER
+      // first, then by title — row-first into a two-column shelf on the SAME
+      // lattice the drag magnet uses. Which blocks are DRAWN does not change
+      // (linked ∪ open unlinked, plus the KTF fallback above); only their order.
+      var drawn = linked.concat(unlinked);
+      drawn.sort(function (a, b) {
+        var sa = STATUS_ORDER.indexOf(a.status), sb = STATUS_ORDER.indexOf(b.status);
+        if (sa < 0) sa = STATUS_ORDER.length;
+        if (sb < 0) sb = STATUS_ORDER.length;
+        if (sa !== sb) return sa - sb;
+        return String(a.title || "").localeCompare(String(b.title || ""), "en", { numeric: true, sensitivity: "base" });
+      });
+      var dmap = new Map(), pl2 = new Map(), colsN = Math.min(2, drawn.length), rowsN = Math.ceil(drawn.length / 2);
+      for (k = 0; k < drawn.length; k++) {
+        dmap.set(drawn[k].id, drawn[k]);
+        pl2.set(drawn[k].id, { x: G.M + (k % 2) * CW, y: G.M + Math.floor(k / 2) * CH });
+      }
+      return {
+        placed: pl2, ulPos: new Map(),
+        width: colsN ? G.M * 2 + colsN * G.W + (colsN - 1) * G.GX : 0,
+        height: rowsN ? G.M * 2 + rowsN * G.H + (rowsN - 1) * G.GY : 0,
+        xShift: 0, parents: new Map(), children: new Map(), nodeMap: dmap,
+        unlinked: [], edges: es, backEdges: bes, routes: [],
+        ulActive: ulActive, ulHiddenTerm: ulHiddenTerm, ulHdrX: 0, ulHdrY: 0, geo: G
+      };
+    }
     var parents = new Map(), children = new Map();
     for (k = 0; k < linked.length; k++) {
       parents.set(linked[k].id, []);
@@ -504,6 +532,14 @@
     return { x: G.M + cx * CW, y: G.M + cy * CH };
   }
 
+  // v10: the rectangle a task block's TOP-LEFT may occupy inside the card, in
+  // model coordinates. The canvas covers the whole card body; the content bbox
+  // (0..vw/0..vh) sits centred inside it via the viewBox offset offX/offY.
+  function blockBoxOf(cw, ch, offX, offY, G) {
+    var x0 = -offX, y0 = -offY;
+    return { x0: x0, y0: y0, x1: Math.max(x0, cw - offX - G.W), y1: Math.max(y0, ch - offY - G.H) };
+  }
+
   // Merge free/magneted drag positions over the layered layout. Manual positions
   // render verbatim (smooth while dragging); their nearest cell is claimed so
   // auto/lattice nodes shift down instead of ever sharing a cell with anything.
@@ -516,8 +552,13 @@
     for (i = 0; i < ids.length; i++) {
       var o = ov && ov[ids[i]];
       if (!o) continue;
-      var k0 = snapCell(o, G);
-      occ.add(k0.x + "," + k0.y);
+      // v10: a manual rect claims EVERY cell it visually overlaps (free drops can
+      // sit between cells now), so no auto node is ever laid on top of it.
+      for (var cxx = G.M; cxx <= o.x + G.W; cxx += CW) {
+        for (var cyy = G.M; cyy <= o.y + G.H; cyy += CH) {
+          if (cxx < o.x + G.W && cyy < o.y + G.H && cxx + G.W > o.x && cyy + G.H > o.y) occ.add(cxx + "," + cyy);
+        }
+      }
       placed.set(ids[i], { x: o.x, y: o.y });
     }
     for (i = 0; i < ids.length; i++) {
@@ -593,6 +634,23 @@
   function blockCount(g, hideSt) {
     var n = 0, i;
     for (i = 0; i < g.nodes.length; i++) if (!(hideSt && hideSt[g.nodes[i].status])) n++;
+    return n;
+  }
+
+  // v10: blocks a card actually paints = every node buildModel put on the
+  // lattice (placed ∪ ulPos) whose status is not hidden by the legend.
+  function visibleBlocks(model, hideSt) {
+    if (!model) return 0;
+    var n = 0;
+    function count(id) {
+      var node = (model.nodeMap && model.nodeMap.get(id)) || null;
+      if (!node && model.unlinked) {
+        for (var i = 0; i < model.unlinked.length; i++) if (model.unlinked[i].id === id) { node = model.unlinked[i]; break; }
+      }
+      if (!node || !(hideSt && hideSt[node.status])) n++;
+    }
+    if (model.placed) model.placed.forEach(function (p, id) { count(id); });
+    if (model.ulPos) model.ulPos.forEach(function (p, id) { count(id); });
     return n;
   }
 
@@ -1433,8 +1491,6 @@
     var ref = useRef(null);
     var ovRef = useRef(ov); ovRef.current = ov;
     var ndRef = useRef(null);
-    var view = useMemo(function () { return buildView(p.model, ov); }, [p.model, ov]);
-    var viewRef = useRef(view); viewRef.current = view;
 
     useEffect(function () {
       var el = ref.current;
@@ -1463,7 +1519,27 @@
       scale = clamp(Math.min((size.w - 4) / vw, (size.h - 4) / vh), MINI_SCALE_MIN, cap);
     }
     var scaleRef = useRef(scale); scaleRef.current = scale;
-    function blockBox() { return { w: Math.max(0, vw - G.W), h: Math.max(0, vh - G.H) }; }
+    // v10: the canvas is the CARD, not the content bbox — blocks may be parked
+    // anywhere inside the card and are clamped so they never cross its border.
+    var cw = size.w > 8 ? Math.max(vw, (size.w - 4) / scale) : vw;
+    var ch = size.h > 8 ? Math.max(vh, (size.h - 4) / scale) : vh;
+    var offX = (cw - vw) / 2, offY = (ch - vh) / 2;
+    var view = useMemo(function () {
+      var box = blockBoxOf(cw, ch, offX, offY, G), o2 = null, kk, q;
+      if (ov) {
+        o2 = {};
+        for (kk in ov) {
+          q = ov[kk];
+          if (!q) continue;
+          o2[kk] = { x: clamp(q.x, box.x0, box.x1), y: clamp(q.y, box.y0, box.y1) };
+        }
+      }
+      return buildView(p.model, o2);
+    }, [p.model, ov, cw, ch, offX, offY]);
+    var viewRef = useRef(view); viewRef.current = view;
+    var boxRef = useRef(null);
+    boxRef.current = blockBoxOf(cw, ch, offX, offY, G);
+    function blockBox() { return boxRef.current; }
 
     // ── block dragging inside the card (persisted per profile) ──
     useEffect(function () {
@@ -1480,7 +1556,7 @@
         if (Math.abs(fx - gx.x) <= MAGNET) fx = gx.x;
         if (Math.abs(fy - gx.y) <= MAGNET) fy = gx.y;
         var box = blockBox();
-        fx = clamp(fx, 0, box.w); fy = clamp(fy, 0, box.h);
+        fx = clamp(fx, box.x0, box.x1); fy = clamp(fy, box.y0, box.y1);
         if (d.last && d.last.x === fx && d.last.y === fy) return;
         d.last = { x: fx, y: fy };
         var nxt = Object.assign({}, ovRef.current);
@@ -1500,19 +1576,29 @@
           occ.add(kc.x + "," + kc.y);
         });
         var cur = (ovRef.current || {})[d.id] || { x: d.ox, y: d.oy };
-        var seed = snapCell(cur, G), fp = null, r, dx, dy;
-        // settle on the nearest free cell that still fits inside the card
-        for (r = 0; r <= 30 && !fp; r++) {
-          for (dy = -r; dy <= r && !fp; dy++) {
-            for (dx = -r; dx <= r && !fp; dx++) {
-              if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-              var cand = snapCell({ x: clamp(seed.x + dx * CW, 0, box.w), y: clamp(seed.y + dy * CH, 0, box.h) }, G);
-              if (cand.x > box.w + 0.5 || cand.y > box.h + 0.5) continue;
+        cur = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1) };
+        // v10: a free drop that touches nothing STAYS where the pointer left it —
+        // blocks may be parked at any position inside the card. Only on a real
+        // collision does the settle hop to the nearest free lattice cell.
+        var clash = false;
+        viewRef.current.placed.forEach(function (q, qid) {
+          if (qid === d.id) return;
+          if (cur.x < q.x + G.W && q.x < cur.x + G.W && cur.y < q.y + G.H && q.y < cur.y + G.H) clash = true;
+        });
+        var fp = null, r, mx, my;
+        if (!clash) fp = cur;
+        var seed = snapCell(cur, G);
+        for (r = 0; !fp && r <= 30; r++) {
+          for (my = -r; my <= r && !fp; my++) {
+            for (mx = -r; mx <= r && !fp; mx++) {
+              if (Math.max(Math.abs(mx), Math.abs(my)) !== r) continue;
+              var cand = snapCell({ x: clamp(seed.x + mx * CW, box.x0, box.x1), y: clamp(seed.y + my * CH, box.y0, box.y1) }, G);
+              if (cand.x < box.x0 - 0.5 || cand.x > box.x1 + 0.5 || cand.y < box.y0 - 0.5 || cand.y > box.y1 + 0.5) continue;
               if (!occ.has(cand.x + "," + cand.y)) fp = cand;
             }
           }
         }
-        if (!fp) fp = seed;
+        if (!fp) fp = { x: clamp(seed.x, box.x0, box.x1), y: clamp(seed.y, box.y0, box.y1) };
         var nxt = Object.assign({}, ovRef.current);
         nxt[d.id] = fp;
         ovRef.current = nxt;
@@ -1580,10 +1666,10 @@
     var body;
     if (!p.group.nodes.length) body = h("div", { className: "kg-pempty" }, "无任务");
     else if (view.placed.size === 0) body = h("div", { className: "kg-pempty" }, "仅剩已结历史");
-    else body = h("div", { className: "kg-pfit" + (ndrag ? " kg-grabbing" : ""), style: { width: (vw * scale) + "px", height: (vh * scale) + "px" } },
+    else body = h("div", { className: "kg-pfit" + (ndrag ? " kg-grabbing" : ""), style: { width: (cw * scale) + "px", height: (ch * scale) + "px" } },
           h("svg", {
-            className: "kg-mini", width: vw * scale, height: vh * scale,
-            viewBox: "0 0 " + vw + " " + vh
+            className: "kg-mini", width: cw * scale, height: ch * scale,
+            viewBox: (-offX) + " " + (-offY) + " " + cw + " " + ch
           }, kids));
     return h("div", { className: "kg-pbody", ref: ref }, body);
   }
@@ -1689,20 +1775,34 @@
     }, [visible, gcfg, byName, hidden, props.hideSt]);
 
     // stored (manual) rects win; anything without one takes the first free slot
+    // v10: a profile card that paints no blocks renders as a title-row strip;
+    // stored rects are never rewritten, so it expands back the moment a block
+    // appears. An expanded card is never shorter than the minimum panel height
+    // (a strip row persisted by 自动排列 must not clip real content).
+    function effRect(id, r) {
+      var it = null;
+      for (var z = 0; z < items.length; z++) if (items[z].id === id) { it = items[z]; break; }
+      if (!it || it.kind !== "prof" || !r) return r;
+      var pn = panels[it.prof.name];
+      return visibleBlocks(pn && pn.model, props.hideSt) === 0
+        ? { x: r.x, y: r.y, w: r.w, h: STRIP_H }
+        : { x: r.x, y: r.y, w: r.w, h: Math.max(r.h, PMIN_H) };
+    }
     var rects = useMemo(function () {
       var base = {}, out = {}, claimed = [];
       Object.keys(layout).forEach(function (k) { if (layout[k]) base[k] = layout[k]; });
       var slots = tileRects(items.length, csize.w, csize.h, PGAP);
-      items.forEach(function (it) { if (base[it.id]) claimed.push(base[it.id]); });
+      items.forEach(function (it) { if (base[it.id]) claimed.push(effRect(it.id, base[it.id])); });
       items.forEach(function (it) {
-        if (base[it.id]) { out[it.id] = base[it.id]; return; }
+        if (base[it.id]) { out[it.id] = effRect(it.id, base[it.id]); return; }
         var cand = null, k;
         for (k = 0; k < slots.length; k++) if (!hasOverlap(slots[k], claimed)) { cand = slots[k]; break; }
-        out[it.id] = cand || pickFreeSlot(claimed, csize.w, csize.h);
-        claimed.push(out[it.id]);
+        var rr = effRect(it.id, cand || pickFreeSlot(claimed, csize.w, csize.h));
+        out[it.id] = rr;
+        claimed.push(rr);
       });
       return out;
-    }, [layout, items, csize]);
+    }, [layout, items, csize, panels, props.hideSt]);
 
     // ── double-click maximise: one card owns the whole content area ──
     var maxIt = null, maxProf = null;
@@ -1740,10 +1840,19 @@
         var r = shown[it.id];
         if (!r) return;
         var body = groupBody(r);
-        out[it.cfg.id] = innerLayout(
+        var ir = innerLayout(
           it.members.map(function (m) { return m.name; }),
           it.cfg.inner, body, INNER_PAD,
           it.members.map(function (m) { return profWeight(blockCount(m, props.hideSt)); }));
+        it.members.forEach(function (m) {
+          var q = ir[m.name];
+          if (!q) return;
+          var pn = panels[m.name];
+          ir[m.name] = visibleBlocks(pn && pn.model, props.hideSt) === 0
+            ? { x: q.x, y: q.y, w: q.w, h: STRIP_H_IN }
+            : { x: q.x, y: q.y, w: q.w, h: Math.max(q.h, IMIN_H) };
+        });
+        out[it.cfg.id] = ir;
       });
       return out;
     }, [items, shown, props.hideSt]);
@@ -2148,7 +2257,20 @@
       if (!gid) {
         arrangeBlocks(name);
         var g = byName[name];
-        var r = fitCardSize(name, g ? g.nodes.length : 0);
+        var pn = panels[name];
+        var r;
+        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) {
+          // v10: an empty card keeps its place but drops to a title-row strip
+          var cur = layoutRef.current[name] || view[name];
+          r = {
+            x: cur ? Math.round(cur.x / GRID) * GRID : PGAP,
+            y: cur ? Math.round(cur.y / GRID) * GRID : PGAP,
+            w: cur ? Math.round(cur.w / GRID) * GRID : 300,
+            h: STRIP_H
+          };
+        } else {
+          r = fitCardSize(name, g ? g.nodes.length : 0);
+        }
         var mv = pushAside(r, othersOf(name), GRID);
         var nxt = Object.assign({}, layoutRef.current);
         nxt[name] = r;
@@ -2174,13 +2296,35 @@
     }
 
     var onAutoArrange = useCallback(function () {
-      var slots = tileRects(items.length, csizeRef.current.w, csizeRef.current.h, PGAP);
+      var W = csizeRef.current.w, H = csizeRef.current.h;
+      var slimSet = {};
+      items.forEach(function (it) {
+        if (it.kind !== "prof") return;
+        var pn = panels[it.prof.name];
+        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) slimSet[it.id] = 1;
+      });
+      var full = items.filter(function (it) { return !slimSet[it.id]; });
+      var slim = items.filter(function (it) { return slimSet[it.id]; });
+      var slots = tileRects(full.length, W, H, PGAP);
       var nxt = Object.assign({}, layoutRef.current);
-      items.forEach(function (it, i) { if (slots[i]) nxt[it.id] = slots[i]; });
+      var maxY = PGAP, i;
+      full.forEach(function (it, i2) { if (slots[i2]) { nxt[it.id] = slots[i2]; maxY = Math.max(maxY, slots[i2].y + slots[i2].h); } });
+      // v10: collapsed cards pack into title-row bars below the tiled area —
+      // stored h = STRIP_H, and effRect lifts it back to PMIN_H when the card
+      // grows blocks again, so the persisted row never clips content.
+      var stripW = 300;
+      var colsS = Math.max(1, Math.floor((W - PGAP) / (stripW + PGAP)));
+      slim.forEach(function (it, i2) {
+        nxt[it.id] = {
+          x: PGAP + (i2 % colsS) * (stripW + PGAP),
+          y: maxY + PGAP + Math.floor(i2 / colsS) * (STRIP_H + PGAP),
+          w: stripW, h: STRIP_H
+        };
+      });
       applyLayout(nxt);
       applyGroups(gcfgRef.current.map(function (c) { return { id: c.id, name: c.name, members: c.members, inner: {} }; }));
       if (maxed) { setMaxed(""); writeMaxed(keyRef.current, ""); }
-    }, [items, maxed]);
+    }, [items, maxed, panels, props.hideSt]);
 
     // ── toolbar ──
     var boardList = boards.length ? boards : [];
@@ -2309,24 +2453,27 @@
     function renderProf(g, r, big, gid) {
       var col = profColor(g.name);
       var isAct = activeOp && activeOp.id === g.name && (!gid || activeOp.gid === gid);
-      return h("div", {
-        key: (gid ? gid + "/" : "") + g.name,
-        className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : ""),
-        "data-prof": g.name,
-        "data-in-group": gid || "",
-        style: { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px", borderTopColor: col }
-      },
-        headBar(g, gid),
-        h(PanelBody, {
+      var pn = panels[g.name];
+      var slim = !big && visibleBlocks(pn && pn.model, props.hideSt) === 0;
+      var kids = [headBar(g, gid)];
+      if (!slim) {
+        kids.push(h(PanelBody, {
           pid: g.name, panel: panels[g.name], hideSt: props.hideSt,
           metaOf: multiBoard ? function (n) { return n.board; } : null,
           big: !!big, ver: miniVer[g.name] || 0, onArrange: arrangeBlocks, onTask: props.onTask
-        }),
-        h("div", {
+        }));
+        kids.push(h("div", {
           className: "kg-prsz", title: "拖动缩放",
           onPointerDown: function (e) { opDown("resize", g.name, e, gid ? "inner" : "top", gid); }
-        })
-      );
+        }));
+      }
+      return h("div", {
+        key: (gid ? gid + "/" : "") + g.name,
+        className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : "") + (slim ? " kg-pstrip" : ""),
+        "data-prof": g.name,
+        "data-in-group": gid || "",
+        style: { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px", borderTopColor: col }
+      }, kids);
     }
 
     function renderGroup(it, r, big) {
@@ -2664,6 +2811,8 @@
     isDoubleTap: isDoubleTap, PROF_W_EMPTY: PROF_W_EMPTY, PROF_W_BUSY: PROF_W_BUSY,
     blockCount: blockCount, nameCmp: nameCmp, orderCards: orderCards,
     freeSpot: freeSpot,
+    visibleBlocks: visibleBlocks, blockBoxOf: blockBoxOf, STATUS_ORDER: STATUS_ORDER,
+    STRIP_H: STRIP_H, STRIP_H_IN: STRIP_H_IN,
     GMIN_W: GMIN_W, GMIN_H: GMIN_H, GHEAD: GHEAD, GBODY_PAD: GBODY_PAD, INNER_PAD: INNER_PAD,
     IMIN_W: IMIN_W, IMIN_H: IMIN_H, GRID: GRID, PGAP: PGAP,
     GEO_MAIN: GEO_MAIN, GEO_MINI: GEO_MINI,
