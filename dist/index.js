@@ -596,6 +596,23 @@
     return n;
   }
 
+  // shared card order: unassigned last, otherwise name with numeric suffixes
+  // comparing numerically (lab2 < lab10) and case-insensitive
+  function nameCmp(a, b) {
+    if ((a === "") !== (b === "")) return a === "" ? 1 : -1;
+    return String(a).localeCompare(String(b), "en", { numeric: true, sensitivity: "base" });
+  }
+
+  // the card order rule, for any set of profile groups: cards that still draw
+  // task blocks come first, then by name. Used for the wall AND inside a group.
+  function orderCards(list, hideSt) {
+    return list.slice().sort(function (a, b) {
+      var ab = blockCount(a, hideSt) > 0, bb = blockCount(b, hideSt) > 0;
+      if (ab !== bb) return ab ? -1 : 1;
+      return nameCmp(a.name, b.name);
+    });
+  }
+
   function groupByProfile(merged, hideSt) {
     var nodes = (merged && merged.nodes) || [];
     var byK = {}, order = [], owner = {}, i;
@@ -626,15 +643,9 @@
       g.cross = n;
       return g;
     });
-    groups.sort(function (a, b) {
-      // cards that still draw task blocks come first (auto-arrange tiles in this
-      // order, so the busy profiles land in the top-left slots); then by profile
-      // name — numeric suffixes compare numerically, unassigned last
-      var ab = blockCount(a, hideSt) > 0, bb = blockCount(b, hideSt) > 0;
-      if (ab !== bb) return ab ? -1 : 1;
-      if ((a.name === "") !== (b.name === "")) return a.name === "" ? 1 : -1;
-      return String(a.name).localeCompare(String(b.name), "en", { numeric: true, sensitivity: "base" });
-    });
+    // cards that still draw task blocks come first (auto-arrange tiles in this
+    // order, so the busy profiles land in the top-left slots); then by name
+    groups = orderCards(groups, hideSt);
     return { groups: groups, cross: cross };
   }
 
@@ -1325,7 +1336,7 @@
 
     var boardList = boards.length ? boards : [{ slug: board || "default", title: board || "default" }];
     var top = h("div", { className: "kg-top" },
-      h("span", { className: "kg-brand" }, "依赖大屏"),
+      h("span", { className: "kg-brand" }, "Board+"),
       modeSwitch(props),
       h(Select, { value: board || undefined, onValueChange: onSelectBoard },
         boardList.map(function (b) { return h(SelectOption, { key: b.slug, value: b.slug }, b.title || b.slug); })),
@@ -1668,10 +1679,14 @@
         var members = [];
         cfg.members.forEach(function (m) { if (byName[m] && !hidden[m]) members.push(byName[m]); });
         if (!members.length) return;
+        // the same order rule applies INSIDE a card: members that still draw
+        // blocks first, then by name — so the busy member takes the big first
+        // slot instead of landing last (user 2026-10-11)
+        members = orderCards(members, props.hideSt);
         out.push({ id: GKEY + gid, kind: "group", cfg: cfg, members: members });
       });
       return out;
-    }, [visible, gcfg, byName, hidden]);
+    }, [visible, gcfg, byName, hidden, props.hideSt]);
 
     // stored (manual) rects win; anything without one takes the first free slot
     var rects = useMemo(function () {
@@ -1728,10 +1743,10 @@
         out[it.cfg.id] = innerLayout(
           it.members.map(function (m) { return m.name; }),
           it.cfg.inner, body, INNER_PAD,
-          it.members.map(function (m) { return profWeight(m.nodes ? m.nodes.length : 0); }));
+          it.members.map(function (m) { return profWeight(blockCount(m, props.hideSt)); }));
       });
       return out;
-    }, [items, shown]);
+    }, [items, shown, props.hideSt]);
 
     var inv = useMemo(function () {
       if (!frozenInRef.current) return innerRects;
@@ -2194,7 +2209,7 @@
     }, [groups]);
 
     var top = h("div", { className: "kg-top" },
-      h("span", { className: "kg-brand" }, "依赖大屏"),
+      h("span", { className: "kg-brand" }, "Board+"),
       modeSwitch(props),
       h(Select, { value: scopeValue, onValueChange: function (v) { props.setScope(v === "__all__" ? "" : v); } }, scopeOptions),
       h(Button, { size: "sm", variant: "outline", onClick: props.onReload }, "刷新"),
@@ -2647,7 +2662,7 @@
     hasOverlap: hasOverlap, GKEY: GKEY,
     squarifyRects: squarifyRects, weightedSlots: weightedSlots, profWeight: profWeight,
     isDoubleTap: isDoubleTap, PROF_W_EMPTY: PROF_W_EMPTY, PROF_W_BUSY: PROF_W_BUSY,
-    blockCount: blockCount,
+    blockCount: blockCount, nameCmp: nameCmp, orderCards: orderCards,
     freeSpot: freeSpot,
     GMIN_W: GMIN_W, GMIN_H: GMIN_H, GHEAD: GHEAD, GBODY_PAD: GBODY_PAD, INNER_PAD: INNER_PAD,
     IMIN_W: IMIN_W, IMIN_H: IMIN_H, GRID: GRID, PGAP: PGAP,

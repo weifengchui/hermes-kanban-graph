@@ -1,6 +1,6 @@
 {
   "name": "kanban-graph",
-  "label": "依赖大屏",
+  "label": "Board+",
   "description": "Kanban dependency graph overview — per-board DAG of parent/child task links",
   "icon": "Workflow",
   "tab": {

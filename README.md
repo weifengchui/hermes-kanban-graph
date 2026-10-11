@@ -1,10 +1,10 @@
-# hermes-kanban-graph — 依赖大屏
+# hermes-kanban-graph — **Board+**（任务依赖大屏）
 
 A dashboard plugin for **Hermes Agent**: every Kanban task as a block, every
 `parent → child` dependency as a wire, one card per profile, all on a single
 draggable wall.
 
-Hermes 的仪表盘插件：把 Kanban 任务画成方块、把 `父 → 子` 依赖画成连线，每个 profile 一张卡片，
+插件名 `Board+`（左侧 tab 就叫这个名字）。Hermes 的仪表盘插件：把 Kanban 任务画成方块、把 `父 → 子` 依赖画成连线，每个 profile 一张卡片，
 全部铺在一面可拖动的大屏上。
 
 ![wall](screenshots/01-wall.png)
@@ -47,15 +47,14 @@ Requirements: Hermes Agent with the dashboard (`hermes dashboard`), and the
 `~/.hermes/profiles/<profile>/plugins/kanban-graph/dashboard/` (or
 `~/.hermes/plugins/kanban-graph/dashboard/` for the default profile).
 
-Then restart the dashboard so the Python API is loaded:
+Then restart the dashboard so the Python API + the manifest label are loaded:
 
 ```bash
 hermes dashboard --stop
 hermes dashboard --no-open --port 9119
 ```
 
-Open `http://127.0.0.1:9119/kanban-graph` (a **依赖大屏** tab appears next to
-Kanban). The JS/CSS are read from disk on every request, so front-end edits only
+Open `http://127.0.0.1:9119/kanban-graph` (a **Board+** tab appears next to Kanban). The JS/CSS are read from disk on every request, so front-end edits only
 need a browser reload — only `plugin_api.py` needs the restart.
 
 Manual install is the same three paths, no build step: the front-end is a plain
