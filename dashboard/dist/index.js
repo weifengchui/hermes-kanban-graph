@@ -11,6 +11,47 @@
   var Badge = comps.Badge, Button = comps.Button, Select = comps.Select, SelectOption = comps.SelectOption;
   var API = "/api/plugins/kanban-graph";
 
+  // ── Hermes 运行状态条 ──
+  // 绿点=该 profile 的 gateway 进程在跑（后端 GET /api/plugins/kanban-graph/api/status
+  // 扫 /proc：cwd=<home>/.hermes/profiles/<name> 且 HOME 匹配）。桌面版 Hermes 无独立
+  // gateway 进程（AppImage 内嵌），故「桌面主对话」不亮绿——如实不造假。
+  // 2026-10-12 教训：此组件曾在被清理的工作区写完未入库而丢失，未 commit 不算存在。
+  var SB_PROFILES = [["liteguard", "当前会话"], ["default", "桌面主对话"], ["coding", "代码"], ["study", "学科"]];
+  var SB_CURRENT = "liteguard";  // dashboard 会话所属 profile；换 profile 时改这里
+  function StatusBar() {
+    var s = useState({ run: [], tot: null, cnt: null });
+    var data = s[0], setData = s[1];
+    useEffect(function () {
+      var alive = true;
+      function tick() {
+        SDK.fetchJSON(API + "/status").then(function (d) {
+          if (alive) setData(function (p) { return { run: (d && d.running) || [], tot: p.tot, cnt: p.cnt }; });
+        }).catch(function () { if (alive) setData(function (p) { return { run: [], tot: p.tot, cnt: p.cnt }; }); });
+        SDK.fetchJSON(API + "/boards").then(function (d) {
+          var bs = (d && d.boards) || [], t = 0, r = 0;
+          bs.forEach(function (b) { t += (b.task_count || 0); r += (b.running || 0); });
+          if (alive) setData(function (p) { return { run: p.run, tot: t, cnt: r }; });
+        }).catch(function () {});
+      }
+      tick();
+      var t2 = setInterval(tick, 30000);
+      return function () { alive = false; clearInterval(t2); };
+    }, []);
+    return h("div", { className: "kg-status-bar" },
+      h("span", { className: "kg-sb-title" }, "Hermes 运行中"),
+      SB_PROFILES.map(function (p) {
+        var on = data.run.indexOf(p[0]) >= 0;
+        return h("span", { key: p[0], className: "kg-sb-item" + (p[0] === SB_CURRENT ? " kg-sb-cur" : "") },
+          h("span", { className: "kg-sb-dot" + (on ? " kg-sb-on" : "") }),
+          h("span", { className: "kg-sb-name" }, p[0]),
+          h("span", null, " · " + p[1]),
+          p[0] === SB_CURRENT ? h("span", { className: "kg-sb-tag" }, " ▸当前") : null);
+      }),
+      h("span", { className: "kg-sb-counts" },
+        data.tot == null ? "全部任务 – / 在办 –" : "全部任务 " + data.tot + " / 在办 " + data.cnt),
+      h("span", { className: "kg-sb-hint" }, "绿点=gateway 进程在跑（桌面版内嵌引擎不亮）"));
+  }
+
   // ─────────────────────────── geometry ───────────────────────────
   // Two coordinate systems share one engine:
   //  · GEO_MAIN — the single-board canvas (and the lattice drag-snapping uses)
@@ -3961,6 +4002,7 @@
     };
 
     return h("div", { className: "kg-root" },
+      h(StatusBar, null),
       mode === "single" ? h(SingleBoardView, shared) : h(MultiProfileView, shared),
       h(TaskModal, { detail: detail, onClose: closeTask }));
   }

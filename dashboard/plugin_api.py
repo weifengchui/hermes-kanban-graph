@@ -34,6 +34,57 @@ NODE_COLUMNS = (
 )
 
 
+DEFAULT_STATUS_PROFILES = ("liteguard", "default", "coding", "study")
+
+
+@router.get("/status")
+def agent_status(profiles: str = Query("")) -> dict:
+    """Which Hermes profile services are running on this machine.
+
+    Detection (read-only /proc scan, HOME-guarded): a profile counts when
+    some process with HOME=<home> has argv `--profile <name>` AND either
+    `gateway run` (the per-profile systemd fleet) or `dashboard` (the
+    session host serving the big screen). argv matching, not cwd: this
+    machine's gateways all run with cwd=hermes-agent.
+    """
+    home = os.path.expanduser("~")
+    wanted = [p for p in re.split(r"[,\s]+", profiles.strip()) if p] or list(DEFAULT_STATUS_PROFILES)
+    want_set = set(wanted)
+    running: set[str] = set()
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        try:
+            argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        text = [a.decode("utf-8", "replace") for a in argv if a]
+        if not any(("gateway" in t and "run" in t) or "dashboard" in t for t in text):
+            continue
+        try:
+            env = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if b"HOME=" + home.encode() not in env:
+            continue
+        hit = False
+        prefix = f"HERMES_HOME={home}/.hermes/profiles/".encode()
+        for kv in env:
+            if kv.startswith(prefix):
+                name = kv[len(prefix):].decode("utf-8", "replace")
+                if name in want_set and any("gateway" in t or "dashboard" in t for t in text):
+                    running.add(name)
+                    hit = True
+        if hit:
+            continue
+        for i, a in enumerate(text):
+            if a == "--profile" and i + 1 < len(text) and text[i + 1] in want_set:
+                running.add(text[i + 1])
+    return {"ok": True, "home": home, "profiles": wanted, "running": sorted(running)}
+
+
 @router.get("/boards")
 def list_boards() -> dict:
     """Return the active board plus all non-archived boards."""

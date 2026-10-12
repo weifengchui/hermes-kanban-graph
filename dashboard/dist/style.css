@@ -457,3 +457,27 @@
 /* v17: block corner resize grip — invisible until hover, screen-stable */
 .kg-node .kg-bres { fill: rgba(96,165,250,.85); stroke: #3b82f6; stroke-width: 1; cursor: nwse-resize; opacity: 0; transition: opacity .12s ease; paint-order: stroke; }
 .kg-node:hover .kg-bres { opacity: 1; }
+
+/* Hermes 运行状态条（顶部常驻；数据源 /api/status + /boards，30s 刷新） */
+.kg-status-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 8px 0; padding: 7px 12px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: 8px; font-size: 12.5px; line-height: 1.5;
+  flex-wrap: wrap; width: 100%; box-sizing: border-box; flex-shrink: 0;
+}
+.kg-status-bar .kg-sb-title { color: #93c5fd; font-weight: 600; }
+.kg-status-bar .kg-sb-item {
+  display: inline-flex; align-items: center; gap: 5px; color: #cbd5e1;
+  padding: 1px 7px; border-radius: 5px; background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(71, 85, 105, 0.35);
+}
+.kg-status-bar .kg-sb-dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; flex-shrink: 0; }
+.kg-status-bar .kg-sb-dot.kg-sb-on { background: #34d399; box-shadow: 0 0 6px rgba(52, 211, 153, 0.7); }
+.kg-status-bar .kg-sb-cur { border-color: rgba(56, 189, 248, 0.5); background: rgba(14, 116, 144, 0.4); }
+.kg-status-bar .kg-sb-cur .kg-sb-name { color: #7dd3fc; }
+.kg-status-bar .kg-sb-cur .kg-sb-dot:not(.kg-sb-on) { background: #38bdf8; }
+.kg-status-bar .kg-sb-cur .kg-sb-tag { color: #38bdf8; font-size: 11px; margin-left: 2px; }
+.kg-status-bar .kg-sb-counts { color: #e2e8f0; margin-left: 4px; }
+.kg-status-bar .kg-sb-hint { color: #64748b; font-size: 11px; margin-left: auto; }
