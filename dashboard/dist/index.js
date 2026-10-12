@@ -68,11 +68,17 @@
   var GKEY = "@g"; // layout-map key prefix marking a group card
 
   // wall-of-panels tuning
-  var GRID = 8, SNAP = 8, PMIN_W = 240, PMIN_H = 150, PDEF_W = 460, PDEF_H = 330, PGAP = 12, MINI_SCALE_MIN = 0.5, MINI_SCALE_MAX = 1.4;
+  var GRID = 8, SNAP = 8, PMIN_W = 240, PMIN_H = 150, PDEF_W = 460, PDEF_H = 330, PGAP = 12, MINI_SCALE_MIN = 0.5, MINI_SCALE_MAX = 3.0; // v14: blocks fill the card (1.5 pinned them small once cards were stretched); scale = min(fitW,fitH) can never overflow, the cap is only a single-block-in-a-giant-row sanity guard
+  // v13 (user 2026-10-11): cards hug their content, blocks render as large as
+  // possible. HUG_TS is the target on-screen scale (block ≈ 168*1.3 ≈ 218px
+  // wide vs ≈185 under the old fixed 2-col tile), HUG_PAD the small gap the
+  // card keeps around the block grid, HUG_HEAD the title row's pixel height.
+  var HUG_TS = 1.3, HUG_PAD = 6, HUG_HEAD = 29;
   // group cards + maximised cards
   var GMIN_W = 320, GMIN_H = 230, GHEAD = 30, GBODY_PAD = 8, INNER_PAD = 6;
   var STRIP_H = 32, STRIP_H_IN = 28; // a collapsed card is just its title row (border 2 + head 28/24 + hairline 1 + border 1)
   var STRIP_MIN_W = 260, STRIP_VGAP = 8; // v11 shelf constants (STRIP_MIN_W kept for layout compat)
+  var STRIP_GAP = 6, STRIP_RESIZE_MIN = 90; // v13: shelf strips sit TIGHT (6px) and may be width-dragged (≥90px)
   // v12 (user 2026-10-11): wall strips are CONTENT width, not stretched rows —
   // a collapsed card must not keep the footprint of an expanded one. Chrome =
   // dot + title padding + count chip + × button; the 自动排列 button hides via
@@ -176,6 +182,20 @@
     } catch (e) { return {}; }
   }
   function writeLayout(k, lay) { lsSet(LS_LAYOUT + k, JSON.stringify(lay || {})); }
+  // v13: shelf strips may be width-dragged; that width lives HERE (per scope),
+  // NOT in layout — layout rects would pin the strip out of the flow. The
+  // shelf flow always re-packs; only the strip's WIDTH becomes manual.
+  var LS_STRIPW = "hermes.kanbangraph.stripW."; // + scope key
+  function readStripWs(k) {
+    try {
+      var o = JSON.parse(lsGet(LS_STRIPW + k) || "{}"), out = {};
+      if (o && typeof o === "object") Object.keys(o).forEach(function (p) {
+        if (typeof o[p] === "number" && o[p] >= STRIP_RESIZE_MIN) out[p] = o[p];
+      });
+      return out;
+    } catch (e) { return {}; }
+  }
+  function writeStripWs(k, m) { lsSet(LS_STRIPW + k, JSON.stringify(m || {})); }
 
   // ── group cards ──────────────────────────────────────────────────────────
   // groups.<scope> = [{ id, name, members:[profile | "§"+gid …], inner:{ token:{x,y,w,h} } }]
@@ -412,9 +432,10 @@
     }
     if (G.KTF) {
       // v10 (user 2026-10-11): blocks inside a card go home sorted by STATUS_ORDER
-      // first, then by title — row-first into a two-column shelf on the SAME
-      // lattice the drag magnet uses. Which blocks are DRAWN does not change
-      // (linked ∪ open unlinked, plus the KTF fallback above); only their order.
+      // first, then by title. v13 (user again): fill COLUMN-FIRST — a queue of
+      // ≤4 blocks takes ONE column (the card turns tall and narrow, and the fit
+      // scale stops being width-capped, so blocks render noticeably bigger);
+      // longer queues wrap into a second column at the same lattice.
       var drawn = linked.concat(unlinked);
       drawn.sort(function (a, b) {
         var sa = STATUS_ORDER.indexOf(a.status), sb = STATUS_ORDER.indexOf(b.status);
@@ -423,15 +444,16 @@
         if (sa !== sb) return sa - sb;
         return String(a.title || "").localeCompare(String(b.title || ""), "en", { numeric: true, sensitivity: "base" });
       });
-      var dmap = new Map(), pl2 = new Map(), colsN = Math.min(2, drawn.length), rowsN = Math.ceil(drawn.length / 2);
+      var dmap = new Map(), pl2 = new Map(), colsN = drawn.length <= 4 ? 1 : 2;
+      var colRows = Math.ceil(drawn.length / colsN);
       for (k = 0; k < drawn.length; k++) {
         dmap.set(drawn[k].id, drawn[k]);
-        pl2.set(drawn[k].id, { x: G.M + (k % 2) * CW, y: G.M + Math.floor(k / 2) * CH });
+        pl2.set(drawn[k].id, { x: G.M + Math.floor(k / colRows) * CW, y: G.M + (k % colRows) * CH });
       }
       return {
         placed: pl2, ulPos: new Map(),
         width: colsN ? G.M * 2 + colsN * G.W + (colsN - 1) * G.GX : 0,
-        height: rowsN ? G.M * 2 + rowsN * G.H + (rowsN - 1) * G.GY : 0,
+        height: colRows ? G.M * 2 + colRows * G.H + (colRows - 1) * G.GY : 0,
         xShift: 0, parents: new Map(), children: new Map(), nodeMap: dmap,
         unlinked: [], edges: es, backEdges: bes, routes: [],
         ulActive: ulActive, ulHiddenTerm: ulHiddenTerm, ulHdrX: 0, ulHdrY: 0, geo: G
@@ -834,12 +856,12 @@
     stripH = stripH || STRIP_H;
     vgap = vgap == null ? STRIP_VGAP : vgap;
     W = Math.max(1, W);
-    var x = gap, rowY = y0;
+    var x = PGAP, rowY = y0; // v13: left margin aligns with the busy cards; INNER gap stays the tight one
     for (var i = 0; i < widths.length; i++) {
       // clamp into the canvas: a strip wider than the wall would start the
       // next row at the same y and overlap
       var w = Math.max(60, Math.min(widths[i], W - 2 * gap));
-      if (x + w > W - gap) { rowY += stripH + vgap; x = gap; }
+      if (x + w > W - gap) { rowY += stripH + vgap; x = PGAP; }
       out.push({ x: x, y: rowY, w: w, h: stripH });
       x += w + gap;
     }
@@ -853,30 +875,137 @@
     return Math.round((out[out.length - 1].y - out[0].y) / (STRIP_H + STRIP_VGAP)) + 1;
   }
 
-  // v11.1: one plan for the whole wall (top 自动排列 + the unstored default
-  // slots). Busy cards pack row-first at a comfortable height, but when the
-  // viewport is shorter than rows*PDEF_H + the strip shelf, the cards shrink
-  // toward PMIN_H so the wall keeps fitting without scrolling where it can.
-  // v12: `slimWidths` is the shelf strips' CONTENT widths (one per strip).
-  function wallPlan(W, H, nFull, slimWidths) {
-    slimWidths = slimWidths || [];
-    var cols = Math.max(1, Math.min(Math.max(1, nFull), Math.floor((W + PGAP) / (PDEF_W + PGAP))));
-    var rows = Math.ceil(nFull / cols);
-    var shelfRowsN = shelfRows(slimWidths, W, PGAP);
-    var shelfH = shelfRowsN > 0 ? shelfRowsN * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + PGAP : 0;
-    var cardH = PDEF_H;
-    if (nFull > 0) {
-      var avail = H - (rows + 1) * PGAP - shelfH;
-      // never pack below the group-card minimum: cards can be merged into a
-      // group at any moment and the container floor is GMIN_H — slots under
-      // it would desync the union and break member avoidance (v11.1/v7 lesson)
-      cardH = Math.max(GMIN_H, Math.min(PDEF_H, Math.floor(avail / rows)));
+  // v13 (user 2026-10-11): a card's NATURAL size around its block grid — the
+  // content bbox scaled toward HUG_TS plus a small breathing gap. mw/mh come
+  // from the model bbox (units), the returned rect is wall px. Width floors at
+  // PMIN_W (chips/close button need it), height at PMIN_H.
+  function cardHugSize(mw, mh) {
+    return {
+      w: clamp(Math.round(mw * HUG_TS) + 2 * HUG_PAD, PMIN_W, 900),
+      h: clamp(Math.round(mh * HUG_TS) + HUG_HEAD + 2 * HUG_PAD, PMIN_H, 660)
+    };
+  }
+  // v13: row-first packing for VARIABLE-width hug cards. Cards pack into a row
+  // until the next one would not fit, rows top-align, each row is exactly as
+  // tall as its tallest card (plus PGAP). Deterministic: same inputs → same
+  // slots, so "auto-arrange" and the unstored defaults agree.
+  function hugPack(sizes, W, gap) {
+    var out = [];
+    if (!sizes || !sizes.length) return out;
+    gap = gap == null ? PGAP : gap;
+    W = Math.max(1, W);
+    var x = gap, y = gap, rowH = 0;
+    for (var i = 0; i < sizes.length; i++) {
+      var w = Math.max(PMIN_W, Math.min(sizes[i].w, W - 2 * gap));
+      var h = sizes[i].h;
+      if (x + w > W - gap && x > gap) { y += rowH + gap; x = gap; rowH = 0; }
+      out.push({ x: x, y: y, w: w, h: h });
+      x += w + gap;
+      rowH = Math.max(rowH, h);
     }
-    var busy = rowPack(nFull, W, PDEF_W, cardH, PGAP);
-    var busyBottom = PGAP;
-    busy.forEach(function (r) { busyBottom = Math.max(busyBottom, r.y + r.h); });
-    var shelf = shelfPack(slimWidths, W, busyBottom + PGAP, STRIP_H, PGAP, STRIP_VGAP);
-    return { busy: busy, shelf: shelf, cardH: cardH, busyBottom: busyBottom };
+    return out;
+  }
+
+  // v14 (user 2026-10-12): 自动排列 must SPREAD the busy cards over the whole
+  // usable screen — cards fill their row edge-to-edge and the busy area fills
+  // the height the shelf leaves — so the mini graph inside a card gets room to
+  // grow and the text is readable without zooming. v13 hugged content (dense,
+  // but left dead wall and pinned blocks at 1.3x).
+  // Invariants that must NOT break:
+  //  · never squeeze below the natural hug height (v13.1 lesson: "blocks as
+  //    large as possible" beats "no scrolling" — a crowded wall simply scrolls);
+  //  · rows stay row-first + top-aligned, one row = one height (tidy grid);
+  //  · collapsed strips keep their content width on the shelf below.
+  // Deterministic: same inputs → same rects, so 自动排列 and the unstored
+  // defaults agree.
+  function fillWall(W, H, sizes, slimWidths, gap) {
+    gap = gap == null ? PGAP : gap;
+    var lay = hugPack(sizes, W, gap); // natural hug slots, input order kept
+    if (!lay.length) return lay;
+    var inner = Math.max(1, W - 2 * gap);
+    // group by row (hugPack emits rows top-aligned, so equal y == same row)
+    var order = [], rows = {}, i, key;
+    for (i = 0; i < lay.length; i++) {
+      key = String(lay[i].y);
+      if (!rows[key]) { rows[key] = []; order.push(key); }
+      rows[key].push(i);
+    }
+    // 1) horizontal: a row spans the wall exactly; the leftover goes to its
+    //    cards PROPORTIONALLY to their natural width, so relative emphasis
+    //    (more/wider content ⇒ wider card) survives the stretch. hugPack only
+    //    adds a card while it fits, so extra >= 0 always.
+    var rowH = {};
+    order.forEach(function (k) {
+      var idxs = rows[k], sum = 0;
+      idxs.forEach(function (j) { sum += lay[j].w; });
+      // the row holds n cards => n-1 INNER gaps must stay paid for, or the
+      // last card lands past W-gap (v14 first cut: 1200-wide wall, row ended
+      // at 1212 — caught by the geometry survey)
+      var extra = inner - gap * (idxs.length - 1) - sum, used = 0;
+      idxs.forEach(function (j, t) {
+        var add = extra > 0 ? (t === idxs.length - 1 ? extra - used : Math.floor(extra * (lay[j].w / sum))) : 0;
+        used += add;
+        lay[j].w = lay[j].w + add;
+      });
+      var hh = 0;
+      idxs.forEach(function (j) { hh = Math.max(hh, lay[j].h); });
+      rowH[k] = hh;
+    });
+    // 2) vertical: the shelf keeps its natural spot under the busy area, so
+    //    the busy rows may use H - gap - shelfH. Distribute the leftover to
+    //    rows proportionally to their natural height. No leftover ⇒ no stretch
+    //    (and NEVER shrink: that was the v11.1 squeeze the user rejected).
+    var natTotal = gap;
+    order.forEach(function (k) { natTotal += rowH[k]; });
+    natTotal += gap * (order.length - 1);
+    var shelfN = shelfRows(slimWidths || [], W, STRIP_GAP);
+    var shelfH = shelfN > 0 ? shelfN * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + STRIP_GAP : 0;
+    var availH = Math.max(0, H - shelfH);
+    var extraH = availH - natTotal;
+    if (extraH > 0) {
+      var usedH = 0;
+      order.forEach(function (k, t) {
+        var add = t === order.length - 1 ? extraH - usedH : Math.floor(extraH * (rowH[k] / natTotal));
+        usedH += add;
+        rowH[k] += add;
+      });
+    }
+    // 3) re-stack BOTH axes: the widths above changed, so the row's x chain has
+    //    to be rebuilt too (v14 first cut kept hugPack's natural x and the
+    //    stretched cards overlapped — caught by the unit layer), and after any
+    //    rounding y is RE-STACKED, never scaled (v13 lesson: scaling
+    //    coordinates after a floor() makes rows overlap).
+    var y = gap;
+    order.forEach(function (k) {
+      var x = gap;
+      rows[k].forEach(function (j) {
+        lay[j].x = x; lay[j].y = y; lay[j].h = rowH[k];
+        x += lay[j].w + gap;
+      });
+      y += rowH[k] + gap;
+    });
+    return lay;
+  }
+
+  // v11.1: one plan for the whole wall (top 自动排列 + the unstored default
+  // slots). v13: busy cards take their HUG size (content-driven, column-first
+  // grids), pack row-first top-aligned. v14: the hug rows are then STRETCHED
+  // to fill the screen (fillWall) — cards edge-to-edge, free height shared.
+  // `slimWidths` is the shelf strips' widths (manual strip resize wins).
+  function wallPlan(W, H, fullSizes, slimWidths) {
+    fullSizes = fullSizes || [];
+    slimWidths = slimWidths || [];
+    var busy = fillWall(W, H, fullSizes, slimWidths, PGAP);
+    var shelfRowsN = shelfRows(slimWidths, W, STRIP_GAP);
+    var shelfH = shelfRowsN > 0 ? shelfRowsN * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + STRIP_GAP : 0;
+    // v13.1: NO height squeeze — the user asked for blocks as large as possible,
+    // so hug heights are final and a crowded wall simply scrolls (v11.1's
+    // fit-without-scrolling squeeze is what made blocks tiny at 16 profiles).
+    void shelfH;
+    var busyBottom2 = PGAP;
+    busy.forEach(function (r) { busyBottom2 = Math.max(busyBottom2, r.y + r.h); });
+    var shelf = shelfPack(slimWidths, W, busyBottom2 + STRIP_GAP, STRIP_H, STRIP_GAP, STRIP_VGAP);
+    return { busy: busy, shelf: shelf, busyBottom: busyBottom2 };
   }
 
   // First free slot on a stable PDEF-sized lattice; extends past the fold when
@@ -1667,7 +1796,14 @@
     // anywhere inside the card and are clamped so they never cross its border.
     var cw = size.w > 8 ? Math.max(vw, (size.w - 4) / scale) : vw;
     var ch = size.h > 8 ? Math.max(vh, (size.h - 4) / scale) : vh;
-    var offX = (cw - vw) / 2, offY = (ch - vh) / 2;
+    // v14 (user 2026-10-12): the lattice stays horizontally centred, but the
+    // grid TOP-ALIGNS vertically. Once cards stretch to fill the screen a card
+    // with few blocks has more height than its own aspect can use — centring
+    // that leftover made the blocks float in mid-air with blank ABOVE them
+    // (flagged by the screenshot review); pinned to the top it reads as a
+    // normal list, and the freed space below becomes parkable room for
+    // manually dragged blocks (blockBoxOf grows with offY=0).
+    var offX = (cw - vw) / 2, offY = 0;
     var view = useMemo(function () {
       var box = blockBoxOf(cw, ch, offX, offY, G), o2 = null, kk, q;
       if (ov) {
@@ -1828,6 +1964,7 @@
     s = useState(function () { return readLayout(scopeKey(props.scope)); }); var layout = s[0], setLayout = s[1];
     s = useState(function () { return readGroups(scopeKey(props.scope)); }); var gcfg = s[0], setGcfg = s[1];
     s = useState(function () { return readMaxed(scopeKey(props.scope)); }); var maxed = s[0], setMaxed = s[1];
+    s = useState(function () { return readStripWs(scopeKey(props.scope)); }); var stripWs = s[0], setStripWs = s[1]; // v13 manual strip widths
     s = useState({}); var miniVer = s[0], setMiniVer = s[1];
     s = useState({ w: 1200, h: 640 }); var csize = s[0], setCsize = s[1];
     s = useState(null); var guides = s[0], setGuides = s[1];
@@ -1838,6 +1975,7 @@
     var editRef = useRef(null);
     var escRef = useRef(false); // Esc cancels: the blur that follows must not save
     var layoutRef = useRef(layout); layoutRef.current = layout;
+    var stripWsRef = useRef(stripWs); stripWsRef.current = stripWs;
     var gcfgRef = useRef(gcfg); gcfgRef.current = gcfg;
     var csizeRef = useRef(csize); csizeRef.current = csize;
     var opRef = useRef(null);
@@ -1874,6 +2012,7 @@
       setLayout(readLayout(k));
       setGcfg(readGroups(k));
       setMaxed(readMaxed(k));
+      setStripWs(readStripWs(k));
     }, [scope]);
 
     var slugs = useMemo(function () { return neededSlugs("multi", "", scope, boards); }, [scope, boards]);
@@ -1995,9 +2134,16 @@
       var pn = panels[it.prof.name];
       // v12: a collapsed strip shrinks to CONTENT width too (storage keeps the
       // expanded width untouched, so it grows straight back on re-entry)
-      return visibleBlocks(pn && pn.model, props.hideSt) === 0
-        ? { x: r.x, y: r.y, w: Math.min(r.w, stripW(it.prof.name)), h: STRIP_H }
-        : { x: r.x, y: r.y, w: r.w, h: Math.max(r.h, PMIN_H) };
+      // v13: a manual strip width (dragged on the shelf) wins over content width
+      if (visibleBlocks(pn && pn.model, props.hideSt) !== 0)
+        return { x: r.x, y: r.y, w: r.w, h: Math.max(r.h, PMIN_H) };
+      var w = stripWs[id] ? Math.max(STRIP_RESIZE_MIN, stripWs[id]) : stripW(it.prof.name);
+      return { x: r.x, y: r.y, w: Math.min(w, csizeRef.current.w - 2 * STRIP_GAP), h: STRIP_H };
+    }
+    // v13: the shelf flow width for one collapsed item (manual drag wins)
+    function shelfW(it) {
+      var w = stripWs[it.id] ? Math.max(STRIP_RESIZE_MIN, stripWs[it.id]) : stripW(it.prof.name);
+      return Math.min(w, Math.max(1, csizeRef.current.w - 2 * STRIP_GAP));
     }
     var rects = useMemo(function () {
       var base = {}, out = {}, claimed = [];
@@ -2013,8 +2159,19 @@
       });
       var fulls = items.filter(function (it) { return !slimIds[it.id]; });
       var strips = items.filter(function (it) { return !!slimIds[it.id]; });
-      var stripWidths = strips.map(function (it) { return stripW(it.prof.name); });
-      var plan = wallPlan(csize.w, csize.h, fulls.length, stripWidths);
+      var stripWidths = strips.map(shelfW);
+      // v13: every busy card's default slot is its HUG size — profile cards
+      // wrap their block grid (+ small gap); group containers keep the group
+      // minimum, their own layout is content-aware inside that.
+      var fullSizes = fulls.map(function (it) {
+        if (it.kind === "prof") {
+          var pn = panels[it.prof.name];
+          var m = pn && pn.model;
+          if (m && (m.width > 0 || m.height > 0)) return cardHugSize(m.width, m.height);
+        }
+        return { w: PDEF_W, h: PDEF_H };
+      });
+      var plan = wallPlan(csize.w, csize.h, fullSizes, stripWidths);
       var busySlots = plan.busy;
       var busyBottom = plan.busyBottom;
       fulls.forEach(function (it) {
@@ -2022,7 +2179,7 @@
         var rr = effRect(it.id, base[it.id]);
         busyBottom = Math.max(busyBottom, rr.y + rr.h);
       });
-      var shelfSlots = shelfPack(stripWidths, csize.w, busyBottom + PGAP, STRIP_H, PGAP, STRIP_VGAP);
+      var shelfSlots = shelfPack(stripWidths, csize.w, busyBottom + STRIP_GAP, STRIP_H, STRIP_GAP, STRIP_VGAP);
       items.forEach(function (it) { if (base[it.id]) claimed.push(effRect(it.id, base[it.id])); });
       items.forEach(function (it) {
         if (base[it.id]) { out[it.id] = effRect(it.id, base[it.id]); return; }
@@ -2034,7 +2191,7 @@
         claimed.push(rr);
       });
       return out;
-    }, [layout, items, csize, panels, props.hideSt]);
+    }, [layout, items, csize, panels, props.hideSt, stripWs]);
 
     // ── double-click maximise: one card owns the whole content area ──
     var maxIt = null, maxProf = null;
@@ -2340,6 +2497,18 @@
           setInnerLive(op.gid, op.id, ires.rect);
           return;
         }
+        // v13: a collapsed STRIP only resizes horizontally — the width rides in
+        // the per-scope stripW map, the shelf flow re-packs live around it.
+        if (op.strip) {
+          op.moved = true;
+          var wN = clamp(Math.round((op.ow + dx) / GRID) * GRID, STRIP_RESIZE_MIN,
+                         Math.max(STRIP_RESIZE_MIN, csizeRef.current.w - 2 * STRIP_GAP));
+          var nws = Object.assign({}, stripWsRef.current);
+          nws[op.id] = wN;
+          stripWsRef.current = nws;
+          setStripWs(nws);
+          return;
+        }
         var mg = op.id.slice(0, 2) === GKEY;
         var minW = mg ? GMIN_W : PMIN_W, minH = mg ? GMIN_H : PMIN_H;
         // ★ resize must be measured from the ORIGINAL box: passing `base` (already
@@ -2365,6 +2534,11 @@
         frozenInRef.current = null;
         rawRef.current = null;
         if (!op || !op.moved) return;
+        // v13: strip width rides in its own map — the shelf flow owns position
+        if (op.strip) {
+          writeStripWs(keyRef.current, stripWsRef.current);
+          return;
+        }
 
         if (op.scope === "inner") {
           var live = innerRects[op.gid] || {};
@@ -2554,7 +2728,11 @@
       }
       opRef.current = {
         kind: kind, id: id, scope: scope2, gid: gid, org: org,
-        sx: e.clientX, sy: e.clientY, ox: r.x, oy: r.y, ow: r.w, oh: r.h, moved: false
+        sx: e.clientX, sy: e.clientY, ox: r.x, oy: r.y, ow: r.w, oh: r.h, moved: false,
+        // v13: resizing a collapsed profile STRIP only changes its width
+        // (stored in the stripW map, the shelf flow re-packs around it)
+        strip: kind === "resize" && scope2 === "top" && id.slice(0, 2) !== GKEY &&
+          visibleBlocks((panels[id] || {}).model, props.hideSt) === 0
       };
       setActiveOp({ kind: kind, id: id, gid: gid });
     }
@@ -2581,14 +2759,16 @@
 
     // the card size its content deserves: area grows with the block count,
     // snapped onto the 8px lattice so the wall stays on-grid
-    function fitCardSize(id, nodeCount) {
-      var scale = clamp(Math.sqrt(Math.max(1, nodeCount) / 6), 0.66, 1.5);
+    function fitCardSize(id, panel) {
+      // v13: "resize to content" = the same HUG size the wall defaults use
+      var m = panel && panel.model;
+      var sz = (m && (m.width > 0 || m.height > 0)) ? cardHugSize(m.width, m.height) : { w: PDEF_W, h: PDEF_H };
       var cur = layoutRef.current[id] || view[id] || null;
       return {
         x: cur ? Math.round(cur.x / GRID) * GRID : PGAP,
         y: cur ? Math.round(cur.y / GRID) * GRID : PGAP,
-        w: Math.round(clamp(PDEF_W * scale, PMIN_W, 900) / GRID) * GRID,
-        h: Math.round(clamp(PDEF_H * scale, PMIN_H, 660) / GRID) * GRID
+        w: Math.round(sz.w / GRID) * GRID,
+        h: Math.round(sz.h / GRID) * GRID
       };
     }
 
@@ -2615,7 +2795,7 @@
             h: STRIP_H
           };
         } else {
-          r = fitCardSize(name, g ? g.nodes.length : 0);
+          r = fitCardSize(name, panels[name]);
         }
         var mv = pushAside(r, othersOf(name), GRID);
         var nxt = Object.assign({}, layoutRef.current);
@@ -2664,25 +2844,31 @@
       });
       var full = items.filter(function (it) { return !slimSet[it.id]; });
       var slim = items.filter(function (it) { return slimSet[it.id]; });
-      // v11: busy cards pack ROW-FIRST at a fixed comfortable height (they fill
-      // a row before wrapping and no longer stretch down the whole canvas), and
-      // collapsed strips sit together on a tight shelf directly under them —
-      // top of the view = cards with blocks, below = only title-row bars.
-      // v11.1: wallPlan shrinks card rows toward PMIN_H when the viewport is
-      // tight, so the busy area + shelf fit the screen where it can.
-      var plan = wallPlan(W, H, full.length, slim.map(function (it) { return stripW(it.prof.name); }));
+      // v11: busy cards pack ROW-FIRST, collapsed strips sit together on a
+      // shelf directly under them — top of the view = cards with blocks.
+      // v13: busy cards pack at their HUG size (content-driven, column-first
+      // grids, blocks as big as the card honestly needs); strips flow tight.
+      var fullSizes = full.map(function (it) {
+        if (it.kind === "prof") {
+          var pn = panels[it.prof.name];
+          var m = pn && pn.model;
+          if (m && (m.width > 0 || m.height > 0)) return cardHugSize(m.width, m.height);
+        }
+        return { w: PDEF_W, h: PDEF_H };
+      });
+      var plan = wallPlan(W, H, fullSizes, slim.map(shelfW));
       var slots = plan.busy;
       var nxt = Object.assign({}, layoutRef.current);
       var maxY = PGAP, i;
       full.forEach(function (it, i2) { if (slots[i2]) { nxt[it.id] = slots[i2]; maxY = Math.max(maxY, slots[i2].y + slots[i2].h); } });
       // stored h = STRIP_H, and effRect lifts it back to PMIN_H when the card
       // grows blocks again, so the persisted row never clips content.
-      var shelf = shelfPack(slim.map(function (it) { return stripW(it.prof.name); }), W, maxY + PGAP, STRIP_H, PGAP, STRIP_VGAP);
+      var shelf = shelfPack(slim.map(shelfW), W, maxY + STRIP_GAP, STRIP_H, STRIP_GAP, STRIP_VGAP);
       slim.forEach(function (it, i2) { if (shelf[i2]) nxt[it.id] = shelf[i2]; });
       applyLayout(nxt);
       applyGroups(gcfgRef.current.map(function (c) { return { id: c.id, name: c.name, members: c.members, inner: {} }; }));
       if (maxed) { setMaxed(""); writeMaxed(keyRef.current, ""); }
-    }, [items, maxed, panels, props.hideSt]);
+    }, [items, maxed, panels, props.hideSt, stripWs]);
 
     // ── toolbar ──
     var boardList = boards.length ? boards : [];
@@ -2821,11 +3007,12 @@
           metaOf: multiBoard ? function (n) { return n.board; } : null,
           big: !!big, ver: miniVer[g.name] || 0, onArrange: arrangeBlocks, onTask: props.onTask
         }));
-        kids.push(h("div", {
-          className: "kg-prsz", title: "拖动缩放",
-          onPointerDown: function (e) { opDown("resize", g.name, e, gid ? "inner" : "top", gid); }
-        }));
       }
+      // v13: a collapsed strip gets the grip too — width-only (see op.strip)
+      kids.push(h("div", {
+        className: "kg-prsz" + (slim ? " kg-srsz" : ""), title: slim ? "拖动调整宽度" : "拖动缩放",
+        onPointerDown: function (e) { opDown("resize", g.name, e, gid ? "inner" : "top", gid); }
+      }));
       return h("div", {
         key: (gid ? gid + "/" : "") + g.name,
         className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : "") + (slim ? " kg-pstrip" : "") + (narrow ? " kg-pnarrow" : ""),
@@ -3224,6 +3411,8 @@
     groupByProfile: groupByProfile, mergeGraphs: mergeGraphs, buildPanels: buildPanels,
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
     rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
+    hugPack: hugPack, cardHugSize: cardHugSize, fillWall: fillWall,
+    HUG_TS: HUG_TS, STRIP_GAP: STRIP_GAP, STRIP_RESIZE_MIN: STRIP_RESIZE_MIN,
     shelfRows: shelfRows, stripW: stripW,
     GTOK: GTOK, isTok: isTok, tokGid: tokGid, NEST_MAX: NEST_MAX,
     sanitizeGroups: sanitizeGroups, groupSubtreeHas: groupSubtreeHas,
@@ -3241,6 +3430,7 @@
     STRIP_H: STRIP_H, STRIP_H_IN: STRIP_H_IN,
     GMIN_W: GMIN_W, GMIN_H: GMIN_H, GHEAD: GHEAD, GBODY_PAD: GBODY_PAD, INNER_PAD: INNER_PAD,
     IMIN_W: IMIN_W, IMIN_H: IMIN_H, GRID: GRID, PGAP: PGAP,
+    MINI_SCALE_MIN: MINI_SCALE_MIN, MINI_SCALE_MAX: MINI_SCALE_MAX, MINI_SCALE_MAX_BIG: MINI_SCALE_MAX_BIG,
     GEO_MAIN: GEO_MAIN, GEO_MINI: GEO_MINI,
     NODE_W: NODE_W, NODE_H: NODE_H, CELL_W: CELL_W, CELL_H: CELL_H, GAP_X: GAP_X, MARGIN: MARGIN
   };
