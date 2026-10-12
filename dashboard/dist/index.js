@@ -16,7 +16,11 @@
   //  · GEO_MAIN — the single-board canvas (and the lattice drag-snapping uses)
   //  · GEO_MINI — compact boxes drawn inside a profile panel
   var GEO_MAIN = { W: 210, H: 56, GX: 96, GY: 20, M: 24, RAD: 10, ULC: 0, UNITS: 28, PAD: 14, TY: 20, MY: 51, DY: 15 };
-  var GEO_MINI = { W: 168, H: 48, GX: 52, GY: 14, M: 12, RAD: 8, ULC: 2, UNITS: 26, PAD: 12, TY: 17, MY: 41, DY: 13, KTF: 1 };
+  // v19 (user 2026-10-12, 3rd ask): M 12 -> 6. Width-fit cards showed a 2*M*scale
+  // side margin that GREW with the block (33-70 CSS px) — the "blocks do not fill
+  // the card" complaint at its core. Half the margin lifts single/double column
+  // fill from ~87-88% to ~93-94% and tightens top/bottom alike.
+  var GEO_MINI = { W: 168, H: 48, GX: 52, GY: 14, M: 6, RAD: 8, ULC: 2, UNITS: 26, PAD: 12, TY: 17, MY: 41, DY: 13, KTF: 1 };
   function cellW(G) { return G.W + G.GX; }
   function cellH(G) { return G.H + G.GY; }
   var NODE_W = GEO_MAIN.W, NODE_H = GEO_MAIN.H, GAP_X = GEO_MAIN.GX, GAP_Y = GEO_MAIN.GY, MARGIN = GEO_MAIN.M;
@@ -56,7 +60,6 @@
   var LS_POS = "hermes.kanbangraph.pos.";
   var LS_UL = "hermes.kanbangraph.showUl";
   var LS_HIDE = "hermes.kanbangraph.hideSt"; // status chip filter: hidden statuses
-  var LS_LINE = "hermes.kanbangraph.lineMode"; // v17: "curve" | "straight" 连线样式
   var LS_MODE = "hermes.kanbangraph.mode"; // "multi" | "single"
   var LS_SCOPE = "hermes.kanbangraph.scope"; // "" = every board
   var LS_HIDEP = "hermes.kanbangraph.hiddenProfiles";
@@ -122,11 +125,6 @@
   function readMode() { return lsGet(LS_MODE) === "single" ? "single" : "multi"; }
   function readScope() { return lsGet(LS_SCOPE) || ""; }
   function readGrid() { return lsGet(LS_GRID) !== "0"; }
-  // v17: 连线样式 — "curve" (default: aligned pairs stay dead straight, cross
-  // rows/cols get an eased bezier so lines stop skating over blocks) and
-  // "straight" (orthogonal elbows / the main view's lane routes, as before).
-  function readLineMode() { var m = lsGet(LS_LINE); return m === "straight" ? "straight" : "curve"; }
-  function writeLineMode(m) { lsSet(LS_LINE, m === "straight" ? "straight" : "curve"); }
 
   // per-board manual node positions: { id: {x,y} }
   function readPos(b) {
@@ -684,7 +682,11 @@
   // model coordinates. The canvas covers the whole card body; the content bbox
   // (0..vw/0..vh) sits centred inside it via the viewBox offset offX/offY.
   function blockBoxOf(cw, ch, offX, offY, G) {
-    var x0 = -offX, y0 = -offY;
+    // v19: the viewBox origin sits ~2.4 units LEFT of the panel rect (measured:
+    // a block clamped to -offX rendered 3.28 CSS px outside the border, and the
+    // leak scales with the fit). Hold the left wall 3 units in — the leak is
+    // proportional so a unit constant covers every scale; visually still flush.
+    var x0 = -offX + 3, y0 = -offY;
     return { x0: x0, y0: y0, x1: Math.max(x0, cw - offX - G.W), y1: Math.max(y0, ch - offY - G.H) };
   }
 
@@ -981,27 +983,55 @@
   // real case: the unassigned card at 31% fill on a 1920 wall), PACK MORE
   // COLUMNS (up to 3) — fill first, then the fewest columns (biggest blocks).
   // Width-fit-governed cards keep base width (that blank is BELOW, v14 note).
-  var KTF_WIDE_MAX = 370; // units — 2.2x the base block (168x48), aspect guard
+  var KTF_WIDE_MAX = 450; // units — v19: 370 left a hard blank on 1-2 block wide
+  // cards (few blocks can't add columns past cmax, so the cap IS the fill loss);
+  // 450 keeps blocks <9.4:1 aspect while letting them eat the real leftover.
   var KTF_COLS_MAX = 3;   // in-card columns stay calm: max 3
   function ktfCols(n) { return n <= 4 ? 1 : 2; }
   function ktfEffGeo(n, w, h, cap) {
     var G0 = GEO_MINI;
     if (!(n > 0 && w > 4 && h > 4)) return { geo: G0, changed: false, cols: 1 };
     var c0 = ktfCols(n), cmax = Math.max(c0, Math.min(n, KTF_COLS_MAX));
-    var best = null;
-    for (var c = c0; c <= cmax; c++) {
+    // v18c (v15 probe): the 200px block-width floor is the release promise —
+    // extra columns may only win while a block still paints >=200 CSS px.
+    // The old "smallest slack" pick happily chose a 3rd/4th column that shrank
+    // blocks to 124px. Candidates >=floor compete on slack; if none reach it,
+    // try DOWNSHIFTING (fewer columns = bigger blocks, the wall scrolls);
+    // only then fall back to the widest rejected candidate.
+    function cand(c) {
       var r = Math.ceil(n / c);
       var vw0 = G0.M * 2 + c * G0.W + (c - 1) * G0.GX;
       var vh0 = G0.M * 2 + r * G0.H + (r - 1) * G0.GY;
       var s0 = clamp(Math.min((w - 4) / vw0, (h - 4) / vh0), MINI_SCALE_MIN, cap || MINI_SCALE_MAX);
-      if (!(s0 > 0)) break;
+      if (!(s0 > 0)) return null;
       var Wr = Math.floor(((w - 4) / s0 - G0.M * 2 - (c - 1) * G0.GX) / c);
       var effW = Math.min(Math.max(Wr, G0.W), KTF_WIDE_MAX);
-      var slack = (w - 4) - (G0.M * 2 + c * effW + (c - 1) * G0.GX) * s0;
-      if (!best || slack < best.slack - 1) best = { cols: c, W: effW, slack: slack };
-      if (Wr <= KTF_WIDE_MAX) break; // fills without the cap → stop, keep the bigger block
+      return { cols: c, W: effW, slack: (w - 4) - (G0.M * 2 + c * effW + (c - 1) * G0.GX) * s0, domW: effW * s0 };
     }
-    if (!best || (best.W <= G0.W && best.cols <= c0)) return { geo: G0, changed: false, cols: c0 };
+    var best = null, inband = null, capped = false;
+    for (var c = c0; c <= cmax; c++) {
+      var cd = cand(c);
+      if (!cd) break;
+      // v18c.2 floor policy: >=240 = clearly fine; 196-240 = "just missed"
+      // (a hair under v13's 200 promise) -> keep as last resort; <196 = the
+      // base geometry simply cannot do better at this column count, accept
+      // but TRY TO DOWNSHIFT below (fewer columns paint bigger blocks).
+      if (cd.domW >= 240 || cd.domW < 196) {
+        if (!best || cd.slack < best.slack - 1) best = cd;
+      } else if (!inband || cd.slack < inband.slack - 1) {
+        inband = cd;
+      }
+      capped = cd.W >= KTF_WIDE_MAX;
+      if (!capped) break; // fills without hitting the width cap → stop, keep it
+    }
+    if (best && best.domW < 196 && best.cols > 1) {
+      for (var c2 = best.cols - 1; c2 >= 1; c2--) {
+        var cd2 = cand(c2);
+        if (cd2 && cd2.domW >= 240) { best = cd2; break; }
+      }
+    }
+    if (!best) best = inband;
+    if (!best || (best.W <= G0.W && best.cols <= c0)) return { geo: G0, changed: false, cols: best ? best.cols : c0 };
     return {
       geo: Object.assign({}, G0, { W: best.W, UNITS: Math.max(G0.UNITS, Math.round(G0.UNITS * best.W / G0.W)) }),
       changed: true, cols: best.cols
@@ -1562,14 +1592,22 @@
   // { id: rect } for the cards that must move (closest-to-the-rect first)
   function pushAside(rect, others, grid) {
     var placed = [{ x: rect.x, y: rect.y, w: rect.w, h: rect.h }], moves = {};
+    // v18b (v7/v13 probes): EVERY card is an obstacle — a shoved neighbour
+    // may never land on a card that was not overlapping the original rect
+    // (the old code only avoided the mover + already-moved spots, so pushes
+    // into a third card went unnoticed and the wall ended up overlapped).
+    others.forEach(function (o) { placed.push(o.rect); });
+    var byId = {};
+    others.forEach(function (o) { byId[o.id] = o.rect; });
     others.slice().sort(function (a, b) {
       return (Math.abs(a.rect.x - rect.x) + Math.abs(a.rect.y - rect.y)) -
              (Math.abs(b.rect.x - rect.x) + Math.abs(b.rect.y - rect.y));
     }).forEach(function (o) {
-      if (!hasOverlap(o.rect, placed)) { placed.push(o.rect); return; }
+      if (!hasOverlap(o.rect, placed.filter(function (p) { return p !== byId[o.id]; }))) return;
       var spot = nearestFree(o.rect, placed, grid);
       moves[o.id] = spot;
-      placed.push(spot);
+      placed = placed.filter(function (p) { return p !== byId[o.id]; }).concat([spot]);
+      byId[o.id] = spot;
     });
     return moves;
   }
@@ -1678,78 +1716,39 @@
     }
     return { a: a, b: b, na: na, nb: nb, same: aligned, dist: Math.hypot(b.x - a.x, b.y - a.y) };
   }
-  function edgePathGeo(p, c, mode) {
+  function edgePathGeo(p, c) {
     var A = edgeAnchors(p, c);
     var r2 = function (v) { return Math.round(v * 100) / 100; };
     var seg = "M " + r2(A.a.x) + " " + r2(A.a.y);
     if (A.same) return seg + " L " + r2(A.b.x) + " " + r2(A.b.y);
-    if (mode === "curve") {
-      var k = Math.max(16, A.dist * 0.42);
-      return seg + " C " + r2(A.a.x + A.na.x * k) + " " + r2(A.a.y + A.na.y * k) +
-        ", " + r2(A.b.x + A.nb.x * k) + " " + r2(A.b.y + A.nb.y * k) +
-        ", " + r2(A.b.x) + " " + r2(A.b.y);
-    }
-    var k2 = Math.max(10, Math.min(60, A.dist * 0.3));
-    var m1 = { x: A.a.x + A.na.x * k2, y: A.a.y + A.na.y * k2 };
-    var m2 = { x: A.b.x + A.nb.x * k2, y: A.b.y + A.nb.y * k2 };
-    var mid = A.na.x !== 0 ? { x: m1.x, y: m2.y } : { x: m2.x, y: m1.y };
-    return seg + " L " + r2(m1.x) + " " + r2(m1.y) + " L " + r2(mid.x) + " " + r2(mid.y) +
-      " L " + r2(m2.x) + " " + r2(m2.y) + " L " + r2(A.b.x) + " " + r2(A.b.y);
+    var k = Math.max(16, A.dist * 0.42);
+    return seg + " C " + r2(A.a.x + A.na.x * k) + " " + r2(A.a.y + A.na.y * k) +
+      ", " + r2(A.b.x + A.nb.x * k) + " " + r2(A.b.y + A.nb.y * k) +
+      ", " + r2(A.b.x) + " " + r2(A.b.y);
   }
 
   // dimOne(e) => true hides the edge's emphasis (selection neighbourhood)
-  function renderEdges(model, view, hideSt, marker, dimOne, mode) {
+  // v18 (user 2026-10-12): ONE edge style — curve. Same-row/col pairs get a
+  // dead-straight segment between the facing edges; anything crossing rows and
+  // columns arcs around the grid. The old straight/lane router is retired.
+  function renderEdges(model, view, hideSt, marker, dimOne) {
     var out = [];
     if (!(model.edges.length || model.backEdges.length)) return out;
     var G = model.geo || GEO_MAIN;
-    mode = mode || readLineMode();
-    // v17: curve mode and every compact (KTF) model route through the adaptive
-    // geo paths; the main view in straight mode keeps the lane-staggered
-    // orthogonal routes (the v10 baseline contract).
-    var useGeo = mode === "curve" || !(model.routes && model.routes.length);
-    // lane slot per (edge, gap): offset verticals so lines don't ride each other
-    var gxMap = new Map(), gcnt = {};
-    model.edges.forEach(function (e2, i2) {
-      var spec2 = model.routes[i2] || [], gs = [];
-      spec2.forEach(function (s2) { if (gs.indexOf(s2.gap) < 0) gs.push(s2.gap); });
-      gs.forEach(function (g2) {
-        gcnt[g2] = gcnt[g2] || 0;
-        gxMap.set(i2 + ":" + g2, G.M + (g2 + (model.xShift || 0)) * cellW(G) + G.W + G.GX / 2 + (((gcnt[g2]++ % 5) - 2) * 14));
-      });
-    });
     function one(e, back, idx) {
       var p = view.placed.get(e.parent), c = view.placed.get(e.child);
       if (!p || !c) return null;
       var pn = model.nodeMap.get(e.parent), cn = model.nodeMap.get(e.child);
       if (fitsHide(pn, hideSt) || fitsHide(cn, hideSt)) return null;
-      if (useGeo) {
-        // v17: relative-position anchors; sizes ride the placed entry when a
-        // block was manually resized, else the lattice box.
-        var pp = { x: p.x, y: p.y, w: p.w || G.W, h: p.h || G.H };
-        var cc = { x: c.x, y: c.y, w: c.w || G.W, h: c.h || G.H };
-        var dim0 = dimOne && dimOne(e);
-        return h("path", {
-          key: (back ? "b" : "e") + idx,
-          className: "kg-edge" + (back ? " kg-back" : "") + (dim0 ? " kg-dim" : "") + (mode === "curve" ? " kg-curve" : ""),
-          d: edgePathGeo(pp, cc, mode),
-          markerEnd: marker ? "url(#" + marker + ")" : undefined
-        });
-      }
-      var pts = [{ x: p.x + G.W, y: p.y + G.H / 2 }];
-      if (!back) {
-        (model.routes[idx] || []).forEach(function (s) {
-          pts.push({
-            x: gxMap.get(idx + ":" + s.gap),
-            y: s.y === "P" ? p.y + G.H / 2 : s.y === "C" ? c.y + G.H / 2 : s.y
-          });
-        });
-      }
-      pts.push({ x: c.x, y: c.y + G.H / 2 });
-      var dim = dimOne && dimOne(e);
+      // relative-position anchors; sizes ride the placed entry when a block
+      // was manually resized, else the lattice box.
+      var pp = { x: p.x, y: p.y, w: p.w || G.W, h: p.h || G.H };
+      var cc = { x: c.x, y: c.y, w: c.w || G.W, h: c.h || G.H };
+      var dim0 = dimOne && dimOne(e);
       return h("path", {
         key: (back ? "b" : "e") + idx,
-        className: "kg-edge" + (back ? " kg-back" : "") + (dim ? " kg-dim" : ""),
-        d: orthPath(pts),
+        className: "kg-edge kg-curve" + (back ? " kg-back" : "") + (dim0 ? " kg-dim" : ""),
+        d: edgePathGeo(pp, cc),
         markerEnd: marker ? "url(#" + marker + ")" : undefined
       });
     }
@@ -2038,11 +2037,6 @@
       }, "网格"),
       h("span", { className: "kg-chips" }, chips),
       h("span", { className: "kg-chip" }, "边 " + ((graph && graph.edges) ? graph.edges.length : 0)),
-      h(Button, {
-        size: "sm", variant: props.lineMode === "curve" ? "default" : "outline",
-        title: "依赖连线样式：曲线=同行/列直线、跨行列圆弧绕行；直线=直角折线",
-        onClick: props.onLineMode
-      }, "连线 " + (props.lineMode === "curve" ? "曲线" : "直线")),
       model.ulActive > 0 ? h(Button, {
         size: "sm", variant: showUl ? "default" : "outline",
         onClick: function () {
@@ -2067,7 +2061,7 @@
       : "这块板还没有依赖关系";
 
     var dimOf = highlight ? function (e) { return !(highlight.has(e.parent) && highlight.has(e.child)); } : null;
-    var svgChildren = renderEdges(model, view, hideSt, "kg-arrow", dimOf, props.lineMode);
+    var svgChildren = renderEdges(model, view, hideSt, "kg-arrow", dimOf);
     function nodeEl(n, extraCls) {
       var pos = view.placed.get(n.id);
       if (!pos) return null;
@@ -2118,6 +2112,22 @@
   }
 
   // ─────────────────── one profile panel (measured + fitted) ───────────────────
+  // module-level twin of the in-component decision (exported for unit tests;
+  // MultiProfileView calls the identical logic)
+  function wakeGroupsSlim(prev, cur, gcfg) {
+    var out = [], k;
+    for (k in cur) {
+      if (!cur.hasOwnProperty(k)) continue;
+      if (prev[k] !== 1 || cur[k] !== 0) continue;
+      var gid = k.slice(0, k.indexOf("/"));
+      if (out.indexOf(gid) >= 0) continue;
+      for (var i = 0; i < gcfg.length; i++) {
+        if (gcfg[i].id === gid && gcfg[i].inner && Object.keys(gcfg[i].inner).length) { out.push(gid); break; }
+      }
+    }
+    return out;
+  }
+
   function PanelBody(props) {
     var s, p = props.panel;
     var cap = props.big ? MINI_SCALE_MAX_BIG : MINI_SCALE_MAX;
@@ -2370,7 +2380,7 @@
           markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
         }, h("path", { className: "kg-arrow", d: "M 0 0 L 10 5 L 0 10 z" })));
       kids.push(defs);
-      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, "", props.lineMode));
+      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, ""));
       var ordered = [];
       mdl.nodeMap.forEach(function (n) { ordered.push(n); });
       ordered.forEach(function (n) {
@@ -2751,10 +2761,39 @@
       setLayout(nxt);
       writeLayout(keyRef.current, nxt);
     }
+    // v18 (user 2026-10-12): a member card that was COLLAPSED to a strip and
+    // just got new task blocks must not stay crammed in its shelf slot — the
+    // group re-runs its 自动排列 (member rects + block tiles reset) whenever
+    // any member flips strip -> busy. Only fires when the group actually has
+    // stored member rects; the first survey just records the baseline.
+    var slimRef = useRef(null);
+    useEffect(function () {
+      if (isMax) return;
+      var cur = {};
+      gcfg.forEach(function (c) {
+        c.members.forEach(function (m) {
+          if (isTok(m) || hidden[m]) return;
+          var pn = panels[m];
+          // a panel that has not arrived yet (first frame after reload, before
+          // the poll) is NOT a collapse — recording it as one made every group
+          // with stored rects take a false wake as soon as data landed.
+          if (!pn) return;
+          cur[c.id + "/" + m] = visibleBlocks(pn && pn.model, props.hideSt) === 0 ? 1 : 0;
+        });
+      });
+      var prev = slimRef.current;
+      slimRef.current = cur;
+      if (!prev) return;
+      wakeGroupsSlim(prev, cur, gcfgRef.current || []).forEach(function (gid) {
+        autoArrangeCard(gid, "", false);
+      });
+    }, [gcfg, panels, props.hideSt, hidden]);
+
     // v17 (user 2026-10-12): a refresh must NOT reshuffle the wall. The first
     // time a card has no stored slot we PIN the computed default into the
     // layout; from then on only manual drags move it, and a full re-flow
     // happens exactly when 自动排列 is clicked.
+    var pinStableRef = useRef(null);
     useEffect(function () {
       if (activeOp || frozenRef.current) return;
       var cur = layoutRef.current || {}, nxt = null, id, r;
@@ -2765,7 +2804,16 @@
         nxt = nxt || Object.assign({}, cur);
         nxt[id] = { x: r.x, y: r.y, w: r.w, h: r.h };
       }
-      if (nxt) applyLayout(nxt);
+      if (!nxt) return;
+      // v18 stability gate: the first frames of a fresh wall are still settling
+      // (measure → hug → strip decide → fillWall stretch). PINNING THAT snapshot
+      // froze mid-animation geometry that the 自动排列 button no longer matched
+      // (v14 probe, 10-12). Only pin a missing-slot set that repeats two rounds
+      // in a row — a wall still moving keeps re-surveying instead of freezing.
+      var sig = JSON.stringify(nxt);
+      if (pinStableRef.current !== sig) { pinStableRef.current = sig; return; }
+      applyLayout(nxt);
+      pinStableRef.current = null;
     }, [rects]);
     function applyGroups(arr) {
       var clean = sanitizeGroups((arr || []).filter(function (c) { return c && c.id && Array.isArray(c.members); }));
@@ -2832,13 +2880,45 @@
         name: "分组 " + n, members: names.slice(), inner: {}
       };
     }
+    // v18b (v7 probe): an escaped member that joins/creates ANOTHER container
+    // must not stay in its old one too — double ownership made both groups
+    // grow and collide. Below the 2-member floor sanitizeGroups drops the
+    // empty husk automatically.
+    function stripMember(arr, pid) {
+      return arr.map(function (c) {
+        if (c.members.indexOf(pid) < 0) return c;
+        var inn = Object.assign({}, c.inner); delete inn[pid];
+        return { id: c.id, name: c.name, members: c.members.filter(function (m) { return m !== pid; }), inner: inn };
+      });
+    }
     // the group card wraps what its members used to occupy
+    // v18b (v7 probe): the wrapped union is often BIGGER than either member —
+    // it keeps its spot and the neighbours it rides on get pushed aside
+    // (a group shoved into a far free slot was unreachable / off-wall).
     function groupRectFor(a, b) {
       var u = (a && b) ? unionRect(a, b) : (a || b || { x: PGAP, y: PGAP, w: PDEF_W, h: PDEF_H });
       var w = Math.max(GMIN_W, u.w + 2 * GBODY_PAD);
       var hh = Math.max(GMIN_H, u.h + GHEAD + 2 * GBODY_PAD);
       var x = Math.max(0, Math.min(u.x - GBODY_PAD, Math.max(0, csizeRef.current.w - w)));
       return { x: x, y: Math.max(0, u.y - GHEAD), w: w, h: hh };
+    }
+    function otherRects(except) {
+      var out = [];
+      items.forEach(function (it2) {
+        if (except.indexOf(it2.id) >= 0) return;
+        var rr = view[it2.id];
+        if (rr) out.push({ id: it2.id, rect: rr });
+      });
+      return out;
+    }
+    // place a freshly minted top-level group and step its obstacles aside;
+    // returns the layout mutations (group rect + mover ids)
+    function groupPlace(gid, r, exceptIds) {
+      var mv = pushAside(r, otherRects(exceptIds), GRID);
+      var lay = Object.assign({}, layoutRef.current);
+      lay[GKEY + gid] = r;
+      Object.keys(mv).forEach(function (id) { lay[id] = mv[id]; });
+      return lay;
     }
     function addToGroup(gid, prof) {
       var arr = gcfgRef.current.map(function (c) {
@@ -3063,21 +3143,21 @@
                 if (tg.kind === "group") nestInto(tokGid(op.id), tg.cfg.id);
                 else {
                   var g2 = mintGroup([tg.id, op.id]);
-                  var lay2b = Object.assign({}, layoutRef.current);
-                  lay2b[GKEY + g2.id] = groupRectFor(view[tg.id], nestAbsRef.current[tokGid(op.id)]);
+                  var lay2b = groupPlace(g2.id,
+                    groupRectFor(view[tg.id], nestAbsRef.current[tokGid(op.id)]),
+                    [tg.id, GKEY + tokGid(op.id)]);
                   delete lay2b[tg.id];
-                  applyGroups(gcfgRef.current.concat([g2]));
+                  applyGroups(stripMember(gcfgRef.current, op.id).concat([g2]));
                   applyLayout(lay2b);
                 }
                 return;
               }
               if (tg.kind === "group") { addToGroup(tg.cfg.id, op.id); return; }
               var g3 = mintGroup([tg.id, op.id]);
-              var lay3 = Object.assign({}, layoutRef.current);
-              lay3[GKEY + g3.id] = groupRectFor(view[tg.id], abs);
+              var lay3 = groupPlace(g3.id, groupRectFor(view[tg.id], abs), [tg.id, op.id]);
               delete lay3[tg.id];
               delete lay3[op.id];
-              applyGroups(gcfgRef.current.concat([g3]));
+              applyGroups(stripMember(gcfgRef.current, op.id).concat([g3]));
               applyLayout(lay3);
               return;
             }
@@ -3129,21 +3209,22 @@
         // only a *move* can land on another card: a resize keeps its own corner
         var tgt = null;
         if (op.kind === "move") {
-          var pt = (e && typeof e.clientX === "number")
-            ? { x: e.clientX - op.org.x, y: e.clientY - op.org.y }
-            : { x: fin.x + fin.w / 2, y: fin.y + fin.h / 2 };
+          // v18 (user 2026-10-12): JOINING takes a real overlap — the dropped
+          // card must cover at least half of the target (or of itself). Anything
+          // lighter means "put it down here", and the neighbours it rides on
+          // PUSH ASIDE to make room (the no-target branch below already does).
+          var best = 0;
           items.forEach(function (it2) {
             if (it2.id === op.id) return;
             var rr = view[it2.id];
-            if (rr && insideRect(rr, pt)) tgt = it2;
+            if (!rr) return;
+            var ox = Math.min(fin.x + fin.w, rr.x + rr.w) - Math.max(fin.x, rr.x);
+            var oy = Math.min(fin.y + fin.h, rr.y + rr.h) - Math.max(fin.y, rr.y);
+            if (ox <= 0 || oy <= 0) return;
+            var share = (ox * oy) / Math.min(fin.w * fin.h, rr.w * rr.h);
+            if (share > best) { best = share; tgt = it2; }
           });
-          if (!tgt) {
-            items.forEach(function (it2) {
-              if (it2.id === op.id || tgt) return;
-              var rr2 = view[it2.id];
-              if (rr2 && insideRect(rr2, { x: fin.x + fin.w / 2, y: fin.y + fin.h / 2 })) tgt = it2;
-            });
-          }
+          if (best < 0.5) tgt = null;
         }
         if (tgt) {
           var isG = op.id.slice(0, 2) === GKEY;
@@ -3157,8 +3238,7 @@
           }
           if (isG) { addToGroup(op.id.slice(2), tgt.id); return; }
           var g = mintGroup([tgt.id, op.id]);
-          var lay = Object.assign({}, layoutRef.current);
-          lay[GKEY + g.id] = groupRectFor(view[tgt.id], view[op.id]);
+          var lay = groupPlace(g.id, groupRectFor(view[tgt.id], view[op.id]), [tgt.id, op.id]);
           delete lay[tgt.id];
           delete lay[op.id];
           applyGroups(gcfgRef.current.concat([g]));
@@ -3392,11 +3472,6 @@
         title: "跨 profile 依赖连线",
         onClick: function () { var v = !showCross; setShowCross(v); lsSet(LS_XEDGE, v ? "1" : "0"); }
       }, "跨链 " + grouped.cross.length),
-      h(Button, {
-        size: "sm", variant: props.lineMode === "curve" ? "default" : "outline",
-        title: "依赖连线样式：曲线=同行/列直线、跨行列圆弧绕行；直线=直角折线",
-        onClick: props.onLineMode
-      }, "连线 " + (props.lineMode === "curve" ? "曲线" : "直线")),
       h("span", { className: "kg-chips" }, profChips),
       h("span", { className: "kg-chip" }, "任务 " + totals.nodes),
       h("span", { className: "kg-chip" }, "边 " + totals.edges),
@@ -3789,8 +3864,6 @@
     s = useState(null); var error = s[0], setError = s[1];
     s = useState(0); var reloadKey = s[0], setReloadKey = s[1];
     s = useState(readHide); var hideSt = s[0], setHideSt = s[1];
-    // v17 (user): edge style switch — shared by both views, persisted.
-    s = useState(readLineMode); var lineMode = s[0], setLineSt = s[1];
     s = useState(null); var detail = s[0], setDetail = s[1];
 
     // board list once, then pick the board (single-board view)
@@ -3884,13 +3957,7 @@
       boards: boards, board: board, setBoard: setBoard,
       scope: scope, setScope: setScope,
       graphs: graphs, error: error,
-      hideSt: hideSt, toggleSt: toggleSt, onReload: onReload, onTask: openTask,
-      lineMode: lineMode,
-      onLineMode: function () {
-        var m = lineMode === "curve" ? "straight" : "curve";
-        writeLineMode(m);
-        setLineSt(m);
-      }
+      hideSt: hideSt, toggleSt: toggleSt, onReload: onReload, onTask: openTask
     };
 
     return h("div", { className: "kg-root" },
@@ -3901,7 +3968,7 @@
   // internals exposed for headless acceptance tests (no UI dependency)
   window.__KG_TEST__ = {
     buildModel: buildModel, buildView: buildView, orthPath: orthPath, snapCell: snapCell,
-    edgeAnchors: edgeAnchors, edgePathGeo: edgePathGeo, readLineMode: readLineMode,
+    edgeAnchors: edgeAnchors, edgePathGeo: edgePathGeo, wakeGroupsSlim: wakeGroupsSlim,
     groupByProfile: groupByProfile, mergeGraphs: mergeGraphs, buildPanels: buildPanels,
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
     rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
