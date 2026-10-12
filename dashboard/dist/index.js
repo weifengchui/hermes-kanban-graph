@@ -4103,7 +4103,6 @@
     };
 
     return h("div", { className: "kg-root kg-fsroot", ref: fsRef },
-      h(StatusBar, null),
       fsOn ? h("button", {
         className: "kg-fs-exit", type: "button", title: "退出全屏（或按 Esc）",
         onClick: toggleFs
