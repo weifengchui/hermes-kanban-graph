@@ -38,7 +38,7 @@
       return function () { alive = false; clearInterval(t2); };
     }, []);
     return h("div", { className: "kg-status-bar" },
-      h("span", { className: "kg-sb-title" }, "Hermes 运行中"),
+      h("span", { className: "kg-sb-title" }, "会话运行状态"),
       SB_PROFILES.map(function (p) {
         var on = data.run.indexOf(p[0]) >= 0;
         return h("span", { key: p[0], className: "kg-sb-item" + (p[0] === SB_CURRENT ? " kg-sb-cur" : "") },
@@ -49,7 +49,7 @@
       }),
       h("span", { className: "kg-sb-counts" },
         data.tot == null ? "全部任务 – / 在办 –" : "全部任务 " + data.tot + " / 在办 " + data.cnt),
-      h("span", { className: "kg-sb-hint" }, "绿点=gateway 进程在跑（桌面版内嵌引擎不亮）"));
+      h("span", { className: "kg-sb-hint" }, "绿点=本机有该会话的服务进程；桌面版会话内嵌、无独立进程"));
   }
 
   // ─────────────────────────── geometry ───────────────────────────
@@ -2066,8 +2066,8 @@
     var top = h("div", { className: "kg-top" },
       h("span", { className: "kg-brand" }, "Board+"),
       modeSwitch(props),
-      h(Select, { value: board || undefined, onValueChange: onSelectBoard },
-        boardList.map(function (b) { return h(SelectOption, { key: b.slug, value: b.slug }, b.title || b.slug); })),
+      h("select", { className: "kg-native-sel", value: board || boardList[0].slug, onChange: function (e) { onSelectBoard(e.target.value); } },
+        boardList.map(function (b) { return h("option", { key: b.slug, value: b.slug }, b.title || b.slug); })),
       h(Button, { size: "sm", variant: "outline", onClick: props.onReload }, "刷新"),
       h(Button, { size: "sm", variant: "outline", onClick: fitView }, "适配"),
       h(Button, { size: "sm", variant: "outline", onClick: onAutoLayout }, "自动排列"),
@@ -3473,8 +3473,8 @@
 
     // ── toolbar ──
     var boardList = boards.length ? boards : [];
-    var scopeOptions = [h(SelectOption, { key: "__all__", value: "__all__" }, "全部板")].concat(
-      boardList.map(function (b) { return h(SelectOption, { key: b.slug, value: b.slug }, b.title || b.slug); }));
+    var scopeOptions = [h("option", { key: "__all__", value: "__all__" }, "全部板")].concat(
+      boardList.map(function (b) { return h("option", { key: b.slug, value: b.slug }, b.title || b.slug); }));
     var scopeValue = scope || "__all__";
 
     var profChips = groups.map(function (g) {
@@ -3500,7 +3500,7 @@
     var top = h("div", { className: "kg-top" },
       h("span", { className: "kg-brand" }, "Board+"),
       modeSwitch(props),
-      h(Select, { value: scopeValue, onValueChange: function (v) { props.setScope(v === "__all__" ? "" : v); } }, scopeOptions),
+      h("select", { className: "kg-native-sel", value: scopeValue, onChange: function (e) { props.setScope(e.target.value === "__all__" ? "" : e.target.value); } }, scopeOptions),
       h(Button, { size: "sm", variant: "outline", onClick: props.onReload }, "刷新"),
       h(Button, { size: "sm", variant: "outline", onClick: onAutoArrange }, "自动排列"),
       h(Button, {
