@@ -490,3 +490,28 @@
 }
 .kg-native-sel:hover, .kg-native-sel:focus { border-color: rgba(56, 189, 248, 0.55); outline: none; }
 .kg-native-sel option { background: #0f172a; color: #e2e8f0; }
+
+/* ── v20: fullscreen card area ──
+   the PAGE ROOT (.kg-fsroot) is the fullscreen element; while fullscreen the
+   status bar and both toolbars hide so only the card area stays. Esc or the
+   floating exit chip leaves. Task popup keeps working (it lives in-subtree). */
+.kg-fsroot { position: relative; }
+.kg-fsroot:fullscreen, .kg-fsroot:-webkit-full-screen {
+  height: 100vh;
+  background: var(--color-background, #0b0d10);
+}
+.kg-fsroot:fullscreen .kg-status-bar,
+.kg-fsroot:-webkit-full-screen .kg-status-bar,
+.kg-fsroot:fullscreen .kg-top,
+.kg-fsroot:-webkit-full-screen .kg-top { display: none; }
+.kg-fsroot:fullscreen .kg-root,
+.kg-fsroot:-webkit-full-screen .kg-root { height: 100vh; min-height: 0; }
+.kg-fs-exit {
+  position: absolute; top: 10px; right: 12px; z-index: 50;
+  appearance: none; -webkit-appearance: none;
+  padding: 4px 10px; border-radius: 8px; cursor: pointer;
+  font: inherit; font-size: 12px;
+  color: #7dd3fc; background: rgba(14, 116, 144, .28);
+  border: 1px solid rgba(56, 189, 248, .5);
+}
+.kg-fs-exit:hover { background: rgba(14, 116, 144, .5); }

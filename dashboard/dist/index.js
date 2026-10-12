@@ -1854,6 +1854,14 @@
       panRef.current = { x: 0, y: 0 }; setPan({ x: 0, y: 0 });
     }, []);
 
+    // v20: entering/leaving fullscreen jumps the viewport size — re-fit so the
+    // graph fills the screen instead of sticking to the pre-fullscreen frame
+    useEffect(function () {
+      function onFs() { setTimeout(fitView, 60); }
+      document.addEventListener("fullscreenchange", onFs);
+      return function () { document.removeEventListener("fullscreenchange", onFs); };
+    }, [fitView]);
+
     // per-board manual positions ride on the board switch (legacy free positions
     // from v1 get normalised onto the lattice once, then persisted)
     useEffect(function () {
@@ -2076,6 +2084,10 @@
         title: "拖动时显示参考格子（节点按 " + CELL_W + "×" + CELL_H + "px 格吸附）",
         onClick: function () { var v = !gridOn; setGridOn(v); lsSet(LS_GRID, v ? "1" : "0"); }
       }, "网格"),
+      h(Button, {
+        size: "sm", variant: "outline", title: "全屏：隐藏其他信息，只显示卡片区域（Esc 退出）",
+        onClick: props.onFsToggle
+      }, "全屏"),
       h("span", { className: "kg-chips" }, chips),
       h("span", { className: "kg-chip" }, "边 " + ((graph && graph.edges) ? graph.edges.length : 0)),
       model.ulActive > 0 ? h(Button, {
@@ -3509,6 +3521,10 @@
         onClick: function () { var v = !gridOn; setGridOn(v); lsSet(LS_GRID, v ? "1" : "0"); }
       }, "网格"),
       h(Button, {
+        size: "sm", variant: "outline", title: "全屏：隐藏其他信息，只显示卡片区域（Esc 退出）",
+        onClick: props.onFsToggle
+      }, "全屏"),
+      h(Button, {
         size: "sm", variant: showCross ? "default" : "outline",
         title: "跨 profile 依赖连线",
         onClick: function () { var v = !showCross; setShowCross(v); lsSet(LS_XEDGE, v ? "1" : "0"); }
@@ -3906,6 +3922,11 @@
     s = useState(0); var reloadKey = s[0], setReloadKey = s[1];
     s = useState(readHide); var hideSt = s[0], setHideSt = s[1];
     s = useState(null); var detail = s[0], setDetail = s[1];
+    // v20: fullscreen the card area. The page root is the fullscreen ELEMENT;
+    // CSS hides the status bar + toolbars while it is fullscreen, so only the
+    // card area remains (task popup still works — it lives inside the subtree).
+    s = useState(false); var fsOn = s[0], setFsOn = s[1];
+    var fsRef = useRef(null);
 
     // board list once, then pick the board (single-board view)
     useEffect(function () {
@@ -3993,22 +4014,49 @@
     }, []);
     var closeTask = useCallback(function () { setDetail(null); }, []);
 
+    // v20: keep fsOn synced with the browser (Esc / F11 exit fire fullscreenchange)
+    useEffect(function () {
+      function onFsChange() {
+        setFsOn(!!fsRef.current && document.fullscreenElement === fsRef.current);
+      }
+      document.addEventListener("fullscreenchange", onFsChange);
+      return function () { document.removeEventListener("fullscreenchange", onFsChange); };
+    }, []);
+    var toggleFs = useCallback(function () {
+      var el = fsRef.current;
+      if (!el) return;
+      if (document.fullscreenElement) {
+        if (document.exitFullscreen) document.exitFullscreen().catch(function () {});
+      } else if (el.requestFullscreen) {
+        el.requestFullscreen().catch(function () {});
+      }
+    }, []);
+
     var shared = {
       mode: mode, setMode: setMode,
       boards: boards, board: board, setBoard: setBoard,
       scope: scope, setScope: setScope,
       graphs: graphs, error: error,
-      hideSt: hideSt, toggleSt: toggleSt, onReload: onReload, onTask: openTask
+      hideSt: hideSt, toggleSt: toggleSt, onReload: onReload, onTask: openTask,
+      fsOn: fsOn, onFsToggle: toggleFs
     };
 
-    return h("div", { className: "kg-root" },
+    return h("div", { className: "kg-root kg-fsroot", ref: fsRef },
       h(StatusBar, null),
+      fsOn ? h("button", {
+        className: "kg-fs-exit", type: "button", title: "退出全屏（或按 Esc）",
+        onClick: toggleFs
+      }, "✕ 退出全屏") : null,
       mode === "single" ? h(SingleBoardView, shared) : h(MultiProfileView, shared),
       h(TaskModal, { detail: detail, onClose: closeTask }));
   }
 
   // internals exposed for headless acceptance tests (no UI dependency)
   window.__KG_TEST__ = {
+    fsSupported: function () {
+      return !!(document.documentElement.requestFullscreen && document.fullscreenEnabled !== false);
+    },
+    fsActive: function (el) { return !!el && document.fullscreenElement === el; },
     buildModel: buildModel, buildView: buildView, orthPath: orthPath, snapCell: snapCell,
     edgeAnchors: edgeAnchors, edgePathGeo: edgePathGeo, wakeGroupsSlim: wakeGroupsSlim,
     groupByProfile: groupByProfile, mergeGraphs: mergeGraphs, buildPanels: buildPanels,
