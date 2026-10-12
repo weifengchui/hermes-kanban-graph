@@ -392,7 +392,7 @@
   }
 
   // Layered DAG layout: split linked / unlinked, rank by longest path, barycenter ordering.
-  function buildModel(graph, showUl, G) {
+  function buildModel(graph, showUl, G, opts) {
     G = G || GEO_MAIN;
     var CW = cellW(G), CH = cellH(G);
     var nodes = (graph && graph.nodes) || [];
@@ -444,7 +444,8 @@
         if (sa !== sb) return sa - sb;
         return String(a.title || "").localeCompare(String(b.title || ""), "en", { numeric: true, sensitivity: "base" });
       });
-      var dmap = new Map(), pl2 = new Map(), colsN = ktfCols(drawn.length);
+      var dmap = new Map(), pl2 = new Map(),
+          colsN = Math.max(1, Math.min(drawn.length || 1, (opts && opts.cols) || ktfCols(drawn.length)));
       var colRows = Math.ceil(drawn.length / colsN);
       for (k = 0; k < drawn.length; k++) {
         dmap.set(drawn[k].id, drawn[k]);
@@ -914,22 +915,35 @@
   // into the leftover width — never a pixel stretch, so no text distortion —
   // capped at KTF_WIDE_MAX so a huge card can't turn blocks into flat bands,
   // with UNITS scaling by the same ratio so titles use the new room.
+  // v15.1 (user 2026-10-12, again): when the aspect cap binds and a side
+  // margin STILL remains (few blocks in a very wide / manually widened card —
+  // real case: the unassigned card at 31% fill on a 1920 wall), PACK MORE
+  // COLUMNS (up to 3) — fill first, then the fewest columns (biggest blocks).
   // Width-fit-governed cards keep base width (that blank is BELOW, v14 note).
   var KTF_WIDE_MAX = 370; // units — 2.2x the base block (168x48), aspect guard
+  var KTF_COLS_MAX = 3;   // in-card columns stay calm: max 3
   function ktfCols(n) { return n <= 4 ? 1 : 2; }
   function ktfEffGeo(n, w, h, cap) {
     var G0 = GEO_MINI;
-    if (!(n > 0 && w > 4 && h > 4)) return { geo: G0, changed: false };
-    var c = ktfCols(n), r = Math.ceil(n / c);
-    var vw0 = G0.M * 2 + c * G0.W + (c - 1) * G0.GX;
-    var vh0 = G0.M * 2 + r * G0.H + (r - 1) * G0.GY;
-    var s0 = clamp(Math.min((w - 4) / vw0, (h - 4) / vh0), MINI_SCALE_MIN, cap || MINI_SCALE_MAX);
-    if (!(s0 > 0)) return { geo: G0, changed: false };
-    var Wr = clamp(Math.floor(((w - 4) / s0 - G0.M * 2 - (c - 1) * G0.GX) / c), G0.W, KTF_WIDE_MAX);
-    if (Wr <= G0.W) return { geo: G0, changed: false };
+    if (!(n > 0 && w > 4 && h > 4)) return { geo: G0, changed: false, cols: 1 };
+    var c0 = ktfCols(n), cmax = Math.max(c0, Math.min(n, KTF_COLS_MAX));
+    var best = null;
+    for (var c = c0; c <= cmax; c++) {
+      var r = Math.ceil(n / c);
+      var vw0 = G0.M * 2 + c * G0.W + (c - 1) * G0.GX;
+      var vh0 = G0.M * 2 + r * G0.H + (r - 1) * G0.GY;
+      var s0 = clamp(Math.min((w - 4) / vw0, (h - 4) / vh0), MINI_SCALE_MIN, cap || MINI_SCALE_MAX);
+      if (!(s0 > 0)) break;
+      var Wr = Math.floor(((w - 4) / s0 - G0.M * 2 - (c - 1) * G0.GX) / c);
+      var effW = Math.min(Math.max(Wr, G0.W), KTF_WIDE_MAX);
+      var slack = (w - 4) - (G0.M * 2 + c * effW + (c - 1) * G0.GX) * s0;
+      if (!best || slack < best.slack - 1) best = { cols: c, W: effW, slack: slack };
+      if (Wr <= KTF_WIDE_MAX) break; // fills without the cap → stop, keep the bigger block
+    }
+    if (!best || (best.W <= G0.W && best.cols <= c0)) return { geo: G0, changed: false, cols: c0 };
     return {
-      geo: Object.assign({}, G0, { W: Wr, UNITS: Math.max(G0.UNITS, Math.round(G0.UNITS * Wr / G0.W)) }),
-      changed: true
+      geo: Object.assign({}, G0, { W: best.W, UNITS: Math.max(G0.UNITS, Math.round(G0.UNITS * best.W / G0.W)) }),
+      changed: true, cols: best.cols
     };
   }
   // v13: row-first packing for VARIABLE-width hug cards. Cards pack into a row
@@ -1842,7 +1856,7 @@
     var G = eff.geo;
     var mdl = useMemo(function () {
       if (!eff.changed) return p.model;
-      return buildModel({ nodes: p.group.nodes, edges: p.group.edges, back_edges: p.group.backEdges }, true, eff.geo);
+      return buildModel({ nodes: p.group.nodes, edges: p.group.edges, back_edges: p.group.backEdges }, true, eff.geo, { cols: eff.cols });
     }, [p.model, eff, p.group]);
     var cometMini = eff.changed ? cometD(G) : COMET_D_MINI;
 
