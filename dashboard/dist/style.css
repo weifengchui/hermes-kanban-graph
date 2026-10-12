@@ -446,3 +446,14 @@
 }
 /* content-width shelf strips: no room for the arrange button when narrow */
 .kg-panel.kg-pstrip.kg-pnarrow .kg-pauto { display: none; }
+/* v13: width grip for collapsed shelf strips — a tall thin edge on the RIGHT
+   (ew-resize), not the corner dot; two hairlines read as a grab handle */
+.kg-panel.kg-pstrip .kg-prsz.kg-srsz { top: 0; bottom: 0; right: 0; width: 9px; height: auto; cursor: ew-resize; }
+.kg-panel.kg-pstrip .kg-prsz.kg-srsz::after {
+  right: 2px; bottom: auto; top: 50%; width: 3px; height: 12px; margin-top: -6px;
+  border-right: 1px solid currentColor; border-bottom: 0; border-left: 1px solid currentColor;
+}
+
+/* v17: block corner resize grip — invisible until hover, screen-stable */
+.kg-node .kg-bres { fill: rgba(96,165,250,.85); stroke: #3b82f6; stroke-width: 1; cursor: nwse-resize; opacity: 0; transition: opacity .12s ease; paint-order: stroke; }
+.kg-node:hover .kg-bres { opacity: 1; }

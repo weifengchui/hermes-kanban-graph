@@ -56,6 +56,7 @@
   var LS_POS = "hermes.kanbangraph.pos.";
   var LS_UL = "hermes.kanbangraph.showUl";
   var LS_HIDE = "hermes.kanbangraph.hideSt"; // status chip filter: hidden statuses
+  var LS_LINE = "hermes.kanbangraph.lineMode"; // v17: "curve" | "straight" 连线样式
   var LS_MODE = "hermes.kanbangraph.mode"; // "multi" | "single"
   var LS_SCOPE = "hermes.kanbangraph.scope"; // "" = every board
   var LS_HIDEP = "hermes.kanbangraph.hiddenProfiles";
@@ -121,6 +122,11 @@
   function readMode() { return lsGet(LS_MODE) === "single" ? "single" : "multi"; }
   function readScope() { return lsGet(LS_SCOPE) || ""; }
   function readGrid() { return lsGet(LS_GRID) !== "0"; }
+  // v17: 连线样式 — "curve" (default: aligned pairs stay dead straight, cross
+  // rows/cols get an eased bezier so lines stop skating over blocks) and
+  // "straight" (orthogonal elbows / the main view's lane routes, as before).
+  function readLineMode() { var m = lsGet(LS_LINE); return m === "straight" ? "straight" : "curve"; }
+  function writeLineMode(m) { lsSet(LS_LINE, m === "straight" ? "straight" : "curve"); }
 
   // per-board manual node positions: { id: {x,y} }
   function readPos(b) {
@@ -282,7 +288,13 @@
       var o = JSON.parse(lsGet(LS_MINIPOS + prof) || "{}"), out = {};
       Object.keys(o || {}).forEach(function (id) {
         var p = o[id];
-        if (p && typeof p.x === "number" && typeof p.y === "number") out[id] = { x: p.x, y: p.y };
+        // v17: entries may now carry w/h (manual block resize)
+        if (p && typeof p.x === "number" && typeof p.y === "number") {
+          var e = { x: p.x, y: p.y };
+          if (typeof p.w === "number" && p.w >= 60 && p.w <= 900) e.w = p.w;
+          if (typeof p.h === "number" && p.h >= 36 && p.h <= 700) e.h = p.h;
+          out[id] = e;
+        }
       });
       return out;
     } catch (e) { return {}; }
@@ -436,14 +448,60 @@
       // ≤4 blocks takes ONE column (the card turns tall and narrow, and the fit
       // scale stops being width-capped, so blocks render noticeably bigger);
       // longer queues wrap into a second column at the same lattice.
+      // v17 (user again): DEPENDENCY FIRST — tasks in a relation hug one
+      // column (longest-path layer over forward edges, a barycentre sweep
+      // keeps siblings adjacent), so a chain draws bottom→top in one line and
+      // the queue only wraps when the column is full. Status/title stay as
+      // tie-breakers for unrelated blocks.
       var drawn = linked.concat(unlinked);
-      drawn.sort(function (a, b) {
+      var lmap = new Map();
+      for (k = 0; k < linked.length; k++) lmap.set(linked[k].id, 0);
+      var guard = linked.length + 1;
+      while (guard-- > 0) {
+        var ch2 = false;
+        for (i = 0; i < es.length; i++) {
+          var lP = lmap.get(es[i].parent);
+          if (lP === undefined) continue;
+          var lC = lmap.get(es[i].child);
+          if (lC !== undefined && lC < lP + 1) { lmap.set(es[i].child, lP + 1); ch2 = true; }
+        }
+        if (!ch2) break;
+      }
+      var parOf = new Map();
+      for (k = 0; k < linked.length; k++) parOf.set(linked[k].id, []);
+      for (i = 0; i < es.length; i++) if (parOf.has(es[i].child)) parOf.get(es[i].child).push(es[i].parent);
+      function stCmp(a, b) {
         var sa = STATUS_ORDER.indexOf(a.status), sb = STATUS_ORDER.indexOf(b.status);
         if (sa < 0) sa = STATUS_ORDER.length;
         if (sb < 0) sb = STATUS_ORDER.length;
         if (sa !== sb) return sa - sb;
         return String(a.title || "").localeCompare(String(b.title || ""), "en", { numeric: true, sensitivity: "base" });
-      });
+      }
+      var maxL = 0; lmap.forEach(function (v) { if (v > maxL) maxL = v; });
+      var ordered2 = [], posIdx = new Map();
+      for (k = 0; k <= maxL; k++) {
+        (function (lvl) {
+          var bucket = [];
+          for (var q2 = 0; q2 < linked.length; q2++) if (lmap.get(linked[q2].id) === lvl) bucket.push(linked[q2]);
+          bucket.sort(function (a, b) {
+            var ba = baryOf(a), bb = baryOf(b);
+            if (Math.abs(ba - bb) > 1e-9) return ba - bb;
+            return stCmp(a, b);
+          });
+          for (var j2 = 0; j2 < bucket.length; j2++) posIdx.set(bucket[j2].id, ordered2.length + j2);
+          ordered2 = ordered2.concat(bucket);
+        })(k);
+      }
+      function baryOf(nd) {
+        var ps = parOf.get(nd.id) || [], sum = 0, n = 0;
+        for (var q3 = 0; q3 < ps.length; q3++) {
+          var pv = posIdx.get(ps[q3]);
+          if (pv !== undefined) { sum += pv; n++; }
+        }
+        return n ? sum / n : 1e9;
+      }
+      unlinked.sort(stCmp);
+      drawn = ordered2.concat(unlinked);
       var dmap = new Map(), pl2 = new Map(),
           colsN = Math.max(1, Math.min(drawn.length || 1, (opts && opts.cols) || ktfCols(drawn.length)));
       var colRows = Math.ceil(drawn.length / colsN);
@@ -642,14 +700,17 @@
     for (i = 0; i < ids.length; i++) {
       var o = ov && ov[ids[i]];
       if (!o) continue;
+      // v17: a manual entry may also carry w/h (block resize); the occupancy
+      // footprint it protects grows with the block, not with the lattice.
+      var OW = (o.w && o.w >= 60) ? o.w : G.W, OH = (o.h && o.h >= 36) ? o.h : G.H;
       // v10: a manual rect claims EVERY cell it visually overlaps (free drops can
       // sit between cells now), so no auto node is ever laid on top of it.
-      for (var cxx = G.M; cxx <= o.x + G.W; cxx += CW) {
-        for (var cyy = G.M; cyy <= o.y + G.H; cyy += CH) {
-          if (cxx < o.x + G.W && cyy < o.y + G.H && cxx + G.W > o.x && cyy + G.H > o.y) occ.add(cxx + "," + cyy);
+      for (var cxx = G.M; cxx <= o.x + OW; cxx += CW) {
+        for (var cyy = G.M; cyy <= o.y + OH; cyy += CH) {
+          if (cxx < o.x + OW && cyy < o.y + OH && cxx + G.W > o.x && cyy + G.H > o.y) occ.add(cxx + "," + cyy);
         }
       }
-      placed.set(ids[i], { x: o.x, y: o.y });
+      placed.set(ids[i], { x: o.x, y: o.y, w: o.w, h: o.h });
     }
     for (i = 0; i < ids.length; i++) {
       if (placed.has(ids[i])) continue;
@@ -1328,6 +1389,156 @@
     return out;
   }
 
+  // ── v16 (user 2026-10-12): 组内列优先，折叠沉底，两轴余量都喂给内容 ────
+  // The weighted treemap tiled EVERY member of a group side by side, so a
+  // six-member group squeezed busy cards into narrow ribbons and the blocks
+  // in them became unreadable (real board 2026-10-12). New contract inside a
+  // group body of W×H: busy members (meta = their hug size) stack
+  // COLUMN-FIRST — fill column 1 top-to-bottom, then column 2 — and BOTH
+  // leftover axes go to the content: every column shares the full width, and
+  // leftover height in a column grows its cards (v15/v15.1 ktfEffGeo then
+  // widens or packs the blocks inside). Slim members never tile in between:
+  // their strips pack tight at the BOTTOM of the body, exactly like the wall
+  // shelf. `gap` is the busy gutter; strips keep STRIP_GAP.
+  function colPackSlots(meta, W, H, gap) {
+    var n = meta.length, out = new Array(n), busy = [], slim = [], i;
+    for (i = 0; i < n; i++) {
+      var m = meta[i];
+      if (!m) continue;
+      if (m.slim) slim.push({ i: i, sw: Math.max(90, Math.min(m.sw || 160, W)) });
+      else busy.push({ i: i, w: Math.max(120, m.w), h: Math.max(46, m.h) });
+    }
+    var stripArea = 0, stripSlots = [];
+    if (slim.length) {
+      stripSlots = shelfPack(slim.map(function (s) { return s.sw; }), W, 0, STRIP_H_IN, STRIP_GAP, STRIP_VGAP);
+      stripSlots.forEach(function (r) { stripArea = Math.max(stripArea, r.y + r.h); });
+    }
+    var availH = Math.max(60, H - (stripArea ? stripArea + gap : 0));
+    var cols = [], cur = [], cy = 0;
+    for (i = 0; i < busy.length; i++) {
+      var bh = Math.min(busy[i].h, availH);
+      if (cur.length && cy + bh > availH) { cols.push(cur); cur = []; cy = 0; }
+      cur.push({ idx: busy[i].i, w: busy[i].w, h: bh });
+      cy += bh + gap;
+    }
+    if (cur.length) cols.push(cur);
+    var nC = cols.length;
+    if (nC) {
+      var colW = cols.map(function (c) { var mx = 0; c.forEach(function (it) { mx = Math.max(mx, it.w); }); return mx; });
+      var sumW = 0; colW.forEach(function (x) { sumW += x; }); sumW += gap * (nC - 1);
+      var scale = sumW > W ? W / sumW : 1;
+      var share = scale < 1 ? 0 : (W - sumW) / nC;
+      var xx = 0;
+      cols.forEach(function (c, ci) {
+        var cw = Math.max(120, Math.round(colW[ci] * scale + share));
+        var usedH = 0; c.forEach(function (it) { usedH += it.h; });
+        usedH += gap * (c.length - 1);
+        var extra = Math.max(0, availH - usedH);
+        var yy = 0;
+        c.forEach(function (it) {
+          var hh = Math.round(it.h + (usedH > 0 ? extra * it.h / usedH : 0));
+          out[it.idx] = { x: Math.round(xx), y: Math.round(yy), w: cw, h: Math.max(46, hh) };
+          yy += hh + gap;
+        });
+        xx += cw + gap;
+      });
+    }
+    stripSlots.forEach(function (r, si) {
+      out[slim[si].i] = { x: r.x, y: Math.round(H - stripArea + r.y), w: r.w, h: r.h };
+    });
+    var contentW = 0, contentH = 0;
+    for (i = 0; i < n; i++) if (out[i]) { contentW = Math.max(contentW, out[i].x + out[i].w); contentH = Math.max(contentH, out[i].y + out[i].h); }
+    return { rects: out, contentW: contentW, contentH: contentH };
+  }
+
+  // the group CONTAINER's own hug size for the wall: column-first greedy at
+  // natural widths (no stretch — fillWall grows the card afterwards anyway),
+  // strips flow underneath inside that width, chrome pads on top.
+  function groupHugSize(meta, budget, Wmax) {
+    var busy = [], slim = [], i;
+    for (i = 0; i < meta.length; i++) {
+      var m = meta[i];
+      if (!m) continue;
+      if (m.slim) slim.push(Math.max(90, m.sw || 160));
+      else busy.push({ w: Math.max(120, m.w), h: Math.max(46, m.h) });
+    }
+    var availH = Math.max(120, budget || 420);
+    var cols = [], cur = [], cy = 0;
+    for (i = 0; i < busy.length; i++) {
+      var bh = Math.min(busy[i].h, availH);
+      if (cur.length && cy + bh > availH) { cols.push(cur); cur = []; cy = 0; }
+      cur.push({ w: busy[i].w, h: bh });
+      cy += bh + INNER_PAD;
+    }
+    if (cur.length) cols.push(cur);
+    var bodyW = 0, bodyH = 0;
+    cols.forEach(function (c, ci) {
+      var mx = 0, st = 0;
+      c.forEach(function (it) { mx = Math.max(mx, it.w); st += it.h; });
+      st += INNER_PAD * (c.length - 1);
+      bodyW += mx + (ci ? INNER_PAD : 0);
+      bodyH = Math.max(bodyH, st);
+    });
+    if (slim.length) {
+      var sr = shelfPack(slim, Math.max(1, bodyW), 0, STRIP_H_IN, STRIP_GAP, STRIP_VGAP), sa = 0;
+      sr.forEach(function (r) { sa = Math.max(sa, r.y + r.h); });
+      if (sa) { bodyH += INNER_PAD + sa; bodyW = Math.max(bodyW, (function () { var mxw = 0; sr.forEach(function (r) { mxw = Math.max(mxw, r.x + r.w); }); return mxw; })()); }
+    }
+    return {
+      w: clamp(Math.round(bodyW + 2 * GBODY_PAD), GMIN_W, Math.max(GMIN_W + 1, Wmax || 900)),
+      h: clamp(Math.round(bodyH + GHEAD + GBODY_PAD), GMIN_H, 2000)
+    };
+  }
+
+  // slot plan + manual overrides, v16 style: stored (manual) member rects win,
+  // the rest take the column-first pack; freeSpot keeps the no-overlap promise
+  // when a manual rect lands where a packed card would have gone.
+  function innerLayoutV16(toks, stored, body, meta, gap) {
+    gap = gap == null ? INNER_PAD : gap;
+    stored = stored || {};
+    var slots = colPackSlots(meta, body.w, body.h, gap).rects;
+    var out = {}, claimed = [], i, avail = [];
+    for (i = 0; i < slots.length; i++) if (slots[i]) avail.push(slots[i]);
+    for (i = 0; i < toks.length; i++) if (stored[toks[i]]) claimed.push(clampInnerRect(stored[toks[i]], body));
+    for (i = 0; i < toks.length; i++) {
+      var t = toks[i], r = stored[t] ? clampInnerRect(stored[t], body) : null;
+      if (!r) {
+        r = freeSpot(slots[i] || { x: gap, y: gap, w: Math.max(60, Math.min(IMIN_W, body.w)), h: Math.max(46, Math.min(IMIN_H, body.h)) }, avail, claimed, body, gap);
+        // v16.1: freeSpot's last resort returns the CLAMPED WANT, which can
+        // still bite into a full-height manual card (caught by the v7 rerun:
+        // jl-qa overlapped jl-launch by 39px next to a manual strip). Carve
+        // the slot against every overlapping claim along both axes and keep
+        // the largest survivor; only then fall back.
+        if (hasOverlap(r, claimed)) r = carveAround(r, claimed, body, gap) || r;
+      }
+      out[t] = r;
+      claimed.push(r);
+    }
+    return out;
+  }
+
+  // edge-carve for a crowded group body: for each claim crossing `want`, the
+  // right-of / left-of / below / above remainders are candidates; pick the
+  // biggest that fits and touches nothing. null when nothing survives.
+  function carveAround(want, claimed, body, gap) {
+    var cands = [], i, best = null;
+    for (i = 0; i < claimed.length; i++) {
+      var c = claimed[i];
+      if (!overlaps(want, c)) continue;
+      cands.push({ x: c.x + c.w + gap, y: want.y, w: want.x + want.w - (c.x + c.w + gap), h: want.h });
+      cands.push({ x: want.x, y: want.y, w: c.x - gap - want.x, h: want.h });
+      cands.push({ x: want.x, y: c.y + c.h + gap, w: want.w, h: want.y + want.h - (c.y + c.h + gap) });
+      cands.push({ x: want.x, y: want.y, w: want.w, h: c.y - gap - want.y });
+    }
+    for (i = 0; i < cands.length; i++) {
+      var q = clampInnerRect({ x: Math.max(0, cands[i].x), y: Math.max(0, cands[i].y), w: cands[i].w, h: cands[i].h }, body);
+      if (q.w < 60 || q.h < 46) continue;
+      if (hasOverlap(q, claimed)) continue;
+      if (!best || q.w * q.h > best.w * best.h) best = q;
+    }
+    return best;
+  }
+
   // nearest grid-aligned spot for `rect` that touches nothing in `placed`
   // (rings outwards on the grid, so a displaced card moves as little as possible)
   function nearestFree(rect, placed, grid, reach) {
@@ -1369,8 +1580,18 @@
 
   // ─────────────────────────── node rendering ───────────────────────────
   function renderNode(n, pos, G, opts) {
-    var units = G.UNITS;
+    // v17 (user): a block may carry a MANUAL SIZE (pos.w/h from a corner
+    // drag). Everything derives from it: title wraps to the width, the meta
+    // row hugs the bottom border, extra height just becomes breathing room.
+    var W = (pos.w && pos.w >= 60) ? pos.w : G.W;
+    var H = (pos.h && pos.h >= 36) ? pos.h : G.H;
+    var units = Math.max(10, Math.round(G.UNITS * W / G.W));
     var lines = wrapTitle(n.title, units);
+    var maxLines = Math.max(1, Math.floor((H - G.TY + G.DY - 4) / G.DY));
+    if (lines.length > maxLines) {
+      lines = lines.slice(0, maxLines);
+      lines[maxLines - 1] = lines[maxLines - 1].replace(/\u2026*$/, "") + "\u2026";
+    }
     var tspans = lines.map(function (ln, i) {
       return h("tspan", { key: i, x: G.PAD, dy: i === 0 ? 0 : G.DY }, ln);
     });
@@ -1380,7 +1601,8 @@
       props.onPointerDown = opts.handlers.onPointerDown;
       props.onClick = opts.handlers.onClick;
     }
-    var barY = Math.round(G.H * 0.18);
+    var barY = Math.round(H * 0.18);
+    var MY = Math.min(G.MY + (H - G.H), H - 7);
     var meta = String(opts.metaOf ? (opts.metaOf(n) || "") : (n.assignee || "—"));
     var stTxt = (ICON[n.status] || "●") + " " + (LABEL[n.status] || n.status);
     var cf = G.UNITS >= 28 ? 9.5 : 8, mf = G.UNITS >= 28 ? 11 : 9, sf = G.UNITS >= 28 ? 10.5 : 8.8;
@@ -1389,7 +1611,7 @@
     var tag = n.tag ? String(n.tag) : "";
     var tagW = tag ? Math.round(textPx(tag, cf)) + 10 : 0;
     var metaX = G.PAD + (tagW ? tagW + 6 : 0);
-    var avail = G.W - 12 - textPx(stTxt, sf) * 1.14 - 5 - metaX;
+    var avail = W - 12 - textPx(stTxt, sf) * 1.14 - 5 - metaX;
     var metaTxt = "";
     if (avail > 12) {
       metaTxt = takePx(meta, avail, mf);
@@ -1398,10 +1620,10 @@
     var chroma = n.tagColor || "#9ca3af";
     var chip = tag ? h("g", { key: "tag" },
       h("rect", {
-        className: "kg-mpill", x: G.PAD, y: G.MY - cf + 1, width: tagW, height: cf + 2.6, rx: 3,
+        className: "kg-mpill", x: G.PAD, y: MY - cf + 1, width: tagW, height: cf + 2.6, rx: 3,
         fill: chroma, fillOpacity: 0.15, stroke: chroma, strokeOpacity: 0.34, strokeWidth: 0.7
       }),
-      h("text", { className: "kg-mtag", x: G.PAD + 5, y: G.MY - 1, fill: chroma }, tag)) : null;
+      h("text", { className: "kg-mtag", x: G.PAD + 5, y: MY - 1, fill: chroma }, tag)) : null;
     return h("g", props,
       h("title", null, (n.oid || n.id) + " · " + (LABEL[n.status] || n.status) + " · " + (n.assignee || "—") +
         (n.tagFull ? " · " + n.tagFull : "")),
@@ -1410,20 +1632,81 @@
             h("path", { className: "kg-comet-tail", d: opts.comet, pathLength: 100 }),
             h("path", { className: "kg-comet", d: opts.comet, pathLength: 100 }))
         : null,
-      h("rect", { className: "kg-box", x: 0, y: 0, width: G.W, height: G.H, rx: G.RAD }),
-      h("rect", { className: "kg-bar", x: 0, y: barY, width: 4, height: G.H - 2 * barY, rx: 2 }),
+      h("rect", { className: "kg-box", x: 0, y: 0, width: W, height: H, rx: G.RAD }),
+      h("rect", { className: "kg-bar", x: 0, y: barY, width: 4, height: H - 2 * barY, rx: 2 }),
       h("text", { className: "kg-title", x: G.PAD, y: G.TY }, tspans),
       chip,
-      metaTxt ? h("text", { className: "kg-asg", x: metaX, y: G.MY }, metaTxt) : null,
-      h("text", { className: "kg-st", x: G.W - 12, y: G.MY, "text-anchor": "end" }, stTxt)
+      metaTxt ? h("text", { className: "kg-asg", x: metaX, y: MY }, metaTxt) : null,
+      h("text", { className: "kg-st", x: W - 12, y: MY, "text-anchor": "end" }, stTxt),
+      // v17 resize handle: a corner grip that keeps a constant SCREEN size
+      // (opts.hsz is already units = px/scale from the card component)
+      opts.handlers && opts.handlers.onResizeDown ? h("rect", {
+        className: "kg-bres", x: W - opts.hsz, y: H - opts.hsz,
+        width: opts.hsz, height: opts.hsz, rx: 1.5,
+        onPointerDown: opts.handlers.onResizeDown
+      }) : null
     );
   }
 
+  // ── v17 (user 2026-10-12): adaptive anchors + straight/curve edge paths ──
+  // Anchors follow the RELATIVE position of the two blocks instead of the old
+  // fixed right→left pair: a column stacks its chain bottom→top, a row links
+  // left→right, and a pair that crosses rows AND columns exits/enters through
+  // the facing edges. Aligned pairs get a dead-straight segment (auto-arrange
+  // stays tidy); crossing pairs get either a clean 3-segment elbow ("straight")
+  // or an eased cubic whose controls leave along the anchor normals ("curve"),
+  // so lines arc around the grid instead of skating over the blocks.
+  function edgeAnchors(p, c) {
+    var pcx = p.x + p.w / 2, pcy = p.y + p.h / 2;
+    var ccx = c.x + c.w / 2, ccy = c.y + c.h / 2;
+    var dx = ccx - pcx, dy = ccy - pcy;
+    var rowB = Math.max(p.h, c.h) * 0.6, colB = Math.max(p.w, c.w) * 0.6;
+    var sameCol = Math.abs(dx) <= colB && Math.abs(dy) > rowB;
+    var sameRow = !sameCol && Math.abs(dy) <= rowB && Math.abs(dx) > colB;
+    var aligned = sameCol || sameRow;
+    var a, b, na, nb;
+    // vertical link when ALIGNED in a column, or when a crossing pair is
+    // dominated by its vertical offset; horizontal otherwise
+    if ((aligned && sameCol) || (!aligned && Math.abs(dy) >= Math.abs(dx))) {
+      var sy = dy > 0 ? 1 : -1;
+      a = { x: pcx, y: pcy + sy * p.h / 2 }; b = { x: ccx, y: ccy - sy * c.h / 2 };
+      na = { x: 0, y: sy }; nb = { x: 0, y: -sy };
+    } else {
+      var sx = dx > 0 ? 1 : -1;
+      a = { x: pcx + sx * p.w / 2, y: pcy }; b = { x: ccx - sx * c.w / 2, y: ccy };
+      na = { x: sx, y: 0 }; nb = { x: -sx, y: 0 };
+    }
+    return { a: a, b: b, na: na, nb: nb, same: aligned, dist: Math.hypot(b.x - a.x, b.y - a.y) };
+  }
+  function edgePathGeo(p, c, mode) {
+    var A = edgeAnchors(p, c);
+    var r2 = function (v) { return Math.round(v * 100) / 100; };
+    var seg = "M " + r2(A.a.x) + " " + r2(A.a.y);
+    if (A.same) return seg + " L " + r2(A.b.x) + " " + r2(A.b.y);
+    if (mode === "curve") {
+      var k = Math.max(16, A.dist * 0.42);
+      return seg + " C " + r2(A.a.x + A.na.x * k) + " " + r2(A.a.y + A.na.y * k) +
+        ", " + r2(A.b.x + A.nb.x * k) + " " + r2(A.b.y + A.nb.y * k) +
+        ", " + r2(A.b.x) + " " + r2(A.b.y);
+    }
+    var k2 = Math.max(10, Math.min(60, A.dist * 0.3));
+    var m1 = { x: A.a.x + A.na.x * k2, y: A.a.y + A.na.y * k2 };
+    var m2 = { x: A.b.x + A.nb.x * k2, y: A.b.y + A.nb.y * k2 };
+    var mid = A.na.x !== 0 ? { x: m1.x, y: m2.y } : { x: m2.x, y: m1.y };
+    return seg + " L " + r2(m1.x) + " " + r2(m1.y) + " L " + r2(mid.x) + " " + r2(mid.y) +
+      " L " + r2(m2.x) + " " + r2(m2.y) + " L " + r2(A.b.x) + " " + r2(A.b.y);
+  }
+
   // dimOne(e) => true hides the edge's emphasis (selection neighbourhood)
-  function renderEdges(model, view, hideSt, marker, dimOne) {
+  function renderEdges(model, view, hideSt, marker, dimOne, mode) {
     var out = [];
     if (!(model.edges.length || model.backEdges.length)) return out;
     var G = model.geo || GEO_MAIN;
+    mode = mode || readLineMode();
+    // v17: curve mode and every compact (KTF) model route through the adaptive
+    // geo paths; the main view in straight mode keeps the lane-staggered
+    // orthogonal routes (the v10 baseline contract).
+    var useGeo = mode === "curve" || !(model.routes && model.routes.length);
     // lane slot per (edge, gap): offset verticals so lines don't ride each other
     var gxMap = new Map(), gcnt = {};
     model.edges.forEach(function (e2, i2) {
@@ -1439,6 +1722,19 @@
       if (!p || !c) return null;
       var pn = model.nodeMap.get(e.parent), cn = model.nodeMap.get(e.child);
       if (fitsHide(pn, hideSt) || fitsHide(cn, hideSt)) return null;
+      if (useGeo) {
+        // v17: relative-position anchors; sizes ride the placed entry when a
+        // block was manually resized, else the lattice box.
+        var pp = { x: p.x, y: p.y, w: p.w || G.W, h: p.h || G.H };
+        var cc = { x: c.x, y: c.y, w: c.w || G.W, h: c.h || G.H };
+        var dim0 = dimOne && dimOne(e);
+        return h("path", {
+          key: (back ? "b" : "e") + idx,
+          className: "kg-edge" + (back ? " kg-back" : "") + (dim0 ? " kg-dim" : "") + (mode === "curve" ? " kg-curve" : ""),
+          d: edgePathGeo(pp, cc, mode),
+          markerEnd: marker ? "url(#" + marker + ")" : undefined
+        });
+      }
       var pts = [{ x: p.x + G.W, y: p.y + G.H / 2 }];
       if (!back) {
         (model.routes[idx] || []).forEach(function (s) {
@@ -1742,6 +2038,11 @@
       }, "网格"),
       h("span", { className: "kg-chips" }, chips),
       h("span", { className: "kg-chip" }, "边 " + ((graph && graph.edges) ? graph.edges.length : 0)),
+      h(Button, {
+        size: "sm", variant: props.lineMode === "curve" ? "default" : "outline",
+        title: "依赖连线样式：曲线=同行/列直线、跨行列圆弧绕行；直线=直角折线",
+        onClick: props.onLineMode
+      }, "连线 " + (props.lineMode === "curve" ? "曲线" : "直线")),
       model.ulActive > 0 ? h(Button, {
         size: "sm", variant: showUl ? "default" : "outline",
         onClick: function () {
@@ -1766,7 +2067,7 @@
       : "这块板还没有依赖关系";
 
     var dimOf = highlight ? function (e) { return !(highlight.has(e.parent) && highlight.has(e.child)); } : null;
-    var svgChildren = renderEdges(model, view, hideSt, "kg-arrow", dimOf);
+    var svgChildren = renderEdges(model, view, hideSt, "kg-arrow", dimOf, props.lineMode);
     function nodeEl(n, extraCls) {
       var pos = view.placed.get(n.id);
       if (!pos) return null;
@@ -1827,6 +2128,17 @@
     var ref = useRef(null);
     var ovRef = useRef(ov); ovRef.current = ov;
     var ndRef = useRef(null);
+    var dragPinRef = useRef(null);
+    // v17 FIX (top-left-drop probe, 10-12): dragging ONE block changes the
+    // recomputed truth on the next live reload (300ms), which used to flip the
+    // card between column counts / widened lattices MID-gesture — the drop then
+    // clamped against geometry the user never saw. Freeze the model/size inputs
+    // for the duration of a gesture (same trick as the wall's frozenRef).
+    if (!ndrag) dragPinRef.current = null;
+    var pin = ndrag
+      ? (dragPinRef.current || (dragPinRef.current =
+          { model: p.model, group: p.group, w: size.w, h: size.h, cap: cap }))
+      : { model: p.model, group: p.group, w: size.w, h: size.h, cap: cap };
 
     useEffect(function () {
       var el = ref.current;
@@ -1851,26 +2163,26 @@
     // margin — ktfEffGeo hands that leftover to the block width itself (aspect
     // guarded). Width-governed cards keep the base lattice, as before.
     var eff = useMemo(function () {
-      return ktfEffGeo(p.model.nodeMap.size, size.w, size.h, cap);
-    }, [p.model, size.w, size.h, cap]);
+      return ktfEffGeo(pin.model.nodeMap.size, pin.w, pin.h, pin.cap);
+    }, [pin.model, pin.w, pin.h, pin.cap]);
     var G = eff.geo;
     var mdl = useMemo(function () {
-      if (!eff.changed) return p.model;
-      return buildModel({ nodes: p.group.nodes, edges: p.group.edges, back_edges: p.group.backEdges }, true, eff.geo, { cols: eff.cols });
-    }, [p.model, eff, p.group]);
+      if (!eff.changed) return pin.model;
+      return buildModel({ nodes: pin.group.nodes, edges: pin.group.edges, back_edges: pin.group.backEdges }, true, eff.geo, { cols: eff.cols });
+    }, [pin.model, eff, pin.group]);
     var cometMini = eff.changed ? cometD(G) : COMET_D_MINI;
 
     // the drawing area is pinned to the *auto* layout box (not the live view box)
     // so dragging a block never rescales the whole card mid-gesture
     var vw = Math.max(1, mdl.width), vh = Math.max(1, mdl.height);
-    if (size.w > 4 && size.h > 4) {
-      scale = clamp(Math.min((size.w - 4) / vw, (size.h - 4) / vh), MINI_SCALE_MIN, cap);
+    if (pin.w > 4 && pin.h > 4) {
+      scale = clamp(Math.min((pin.w - 4) / vw, (pin.h - 4) / vh), MINI_SCALE_MIN, pin.cap);
     }
     var scaleRef = useRef(scale); scaleRef.current = scale;
     // v10: the canvas is the CARD, not the content bbox — blocks may be parked
     // anywhere inside the card and are clamped so they never cross its border.
-    var cw = size.w > 8 ? Math.max(vw, (size.w - 4) / scale) : vw;
-    var ch = size.h > 8 ? Math.max(vh, (size.h - 4) / scale) : vh;
+    var cw = pin.w > 8 ? Math.max(vw, (pin.w - 4) / scale) : vw;
+    var ch = pin.h > 8 ? Math.max(vh, (pin.h - 4) / scale) : vh;
     // v14 (user 2026-10-12): the lattice stays horizontally centred, but the
     // grid TOP-ALIGNS vertically. Once cards stretch to fill the screen a card
     // with few blocks has more height than its own aspect can use — centring
@@ -1886,7 +2198,13 @@
         for (kk in ov) {
           q = ov[kk];
           if (!q) continue;
-          o2[kk] = { x: clamp(q.x, box.x0, box.x1), y: clamp(q.y, box.y0, box.y1) };
+          // v17: manual size rides along; the right/bottom border clamp uses
+          // the block's OWN size so a grown block cannot hang off the card.
+          var qw = (q.w && q.w >= 60) ? q.w : G.W;
+          var qh = (q.h && q.h >= 36) ? q.h : G.H;
+          o2[kk] = { x: clamp(q.x, box.x0, Math.max(box.x0, cw - offX - qw)),
+                     y: clamp(q.y, box.y0, Math.max(box.y0, ch - offY - qh)),
+                     w: q.w, h: q.h };
         }
       }
       return buildView(mdl, o2);
@@ -1906,6 +2224,20 @@
         if (!d.moved && Math.abs(ddx) + Math.abs(ddy) > 4) d.moved = true;
         if (!d.moved) return;
         var z = scaleRef.current || 1;
+        // v17: corner-grip resize — the block grows/shrinks in place; its x/y
+        // stay where they are and the view-merge clamp keeps it inside the card.
+        if (d.mode === "res") {
+          var nw = clamp(Math.round((d.ow + ddx / z) / 2) * 2, Math.round(G.W * 0.6), G.W * 4);
+          var nh = clamp(Math.round((d.oh + ddy / z) / 2) * 2, Math.round(G.H * 0.6), G.H * 4);
+          if (d.last && d.last.w === nw && d.last.h === nh) return;
+          d.last = { w: nw, h: nh };
+          var q0 = (ovRef.current || {})[d.id] || { x: d.ox, y: d.oy };
+          var nres = Object.assign({}, ovRef.current);
+          nres[d.id] = { x: q0.x, y: q0.y, w: nw, h: nh };
+          ovRef.current = nres;
+          setOv(nres);
+          return;
+        }
         var fx = d.ox + ddx / z, fy = d.oy + ddy / z;
         var gx = snapCell({ x: fx, y: fy }, G);
         if (Math.abs(fx - gx.x) <= MAGNET) fx = gx.x;
@@ -1923,22 +2255,42 @@
         var d = ndRef.current;
         setNdrag(false);
         if (!d || !d.moved) return;
+        // v17: a resize gesture just persists as-is — no lattice settle, the
+        // block keeps its shape and spot.
+        if (d.mode === "res") {
+          var o1 = {};
+          viewRef.current.placed.forEach(function (q, id) {
+            var v = (ovRef.current || {})[id];
+            if (v) o1[id] = v;
+            void q;
+          });
+          writeMiniPos(props.pid, o1);
+          return;
+        }
         var box = blockBox(), CW = cellW(G), CH = cellH(G);
         var occ = new Set();
         viewRef.current.placed.forEach(function (q, qid) {
           if (qid === d.id) return;
           var kc = snapCell(q, G);
           occ.add(kc.x + "," + kc.y);
+          // v17: a resized neighbour owns every cell its box overlaps
+          var qw = q.w || G.W, qh = q.h || G.H;
+          if (qw > G.W || qh > G.H) {
+            for (var cx2 = G.M; cx2 <= q.x + qw; cx2 += CW)
+              for (var cy2 = G.M; cy2 <= q.y + qh; cy2 += CH)
+                if (cx2 < q.x + qw && cy2 < q.y + qh && cx2 + G.W > q.x && cy2 + G.H > q.y) occ.add(cx2 + "," + cy2);
+          }
         });
         var cur = (ovRef.current || {})[d.id] || { x: d.ox, y: d.oy };
-        cur = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1) };
+        cur = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1), w: cur.w, h: cur.h };
         // v10: a free drop that touches nothing STAYS where the pointer left it —
         // blocks may be parked at any position inside the card. Only on a real
         // collision does the settle hop to the nearest free lattice cell.
         var clash = false;
         viewRef.current.placed.forEach(function (q, qid) {
           if (qid === d.id) return;
-          if (cur.x < q.x + G.W && q.x < cur.x + G.W && cur.y < q.y + G.H && q.y < cur.y + G.H) clash = true;
+          var pw = cur.w || G.W, ph = cur.h || G.H, qw2 = q.w || G.W, qh2 = q.h || G.H;
+          if (cur.x < q.x + qw2 && q.x < cur.x + pw && cur.y < q.y + qh2 && q.y < cur.y + ph) clash = true;
         });
         var fp = null, r, mx, my;
         if (!clash) fp = cur;
@@ -1954,6 +2306,8 @@
           }
         }
         if (!fp) fp = { x: clamp(seed.x, box.x0, box.x1), y: clamp(seed.y, box.y0, box.y1) };
+        // v17: a resized block that had to hop keeps its MANUAL SIZE
+        if (cur.w && cur.h && (!fp.w || fp.x !== cur.x || fp.y !== cur.y)) fp = { x: fp.x, y: fp.y, w: cur.w, h: cur.h };
         var nxt = Object.assign({}, ovRef.current);
         nxt[d.id] = fp;
         ovRef.current = nxt;
@@ -1983,6 +2337,18 @@
       setNdrag(true);
     }
 
+    // v17: corner grip — grow/shrink this block (persisted with the position)
+    function onBlockResizeDown(n, e) {
+      if (e.pointerType === "mouse" && e.button != null && e.button !== 0) return;
+      var cur = viewRef.current.placed.get(n.id);
+      if (!cur) return;
+      e.stopPropagation();
+      e.preventDefault();
+      ndRef.current = { id: n.id, mode: "res", sx: e.clientX, sy: e.clientY,
+                        ox: cur.x, oy: cur.y, ow: cur.w || G.W, oh: cur.h || G.H, moved: false };
+      setNdrag(true);
+    }
+
     function handlersFor(n) {
       return {
         onPointerDown: function (e) {
@@ -1992,34 +2358,35 @@
             return;
           }
           onBlockDown(n, e);
-        }
+        },
+        onResizeDown: function (e) { onBlockResizeDown(n, e); }
       };
     }
     var kids = [];
-    if (p.group.nodes.length) {
+    if (pin.group.nodes.length) {
       var defs = h("defs", { key: "d" },
         h("marker", {
           id: "kga-" + props.pid, viewBox: "0 0 10 10", refX: 9, refY: 5,
           markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
         }, h("path", { className: "kg-arrow", d: "M 0 0 L 10 5 L 0 10 z" })));
       kids.push(defs);
-      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, ""));
+      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, "", props.lineMode));
       var ordered = [];
       mdl.nodeMap.forEach(function (n) { ordered.push(n); });
       ordered.forEach(function (n) {
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: "", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n) }));
+        kids.push(renderNode(n, pos, G, { cls: "", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
-      p.group.nodes.forEach(function (n) {
+      pin.group.nodes.forEach(function (n) {
         if (mdl.nodeMap.has(n.id)) return;
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: " kg-uln", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n) }));
+        kids.push(renderNode(n, pos, G, { cls: " kg-uln", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
     }
     var body;
-    if (!p.group.nodes.length) body = h("div", { className: "kg-pempty" }, "无任务");
+    if (!pin.group.nodes.length) body = h("div", { className: "kg-pempty" }, "无任务");
     else if (view.placed.size === 0) body = h("div", { className: "kg-pempty" }, "仅剩已结历史");
     else body = h("div", { className: "kg-pfit" + (ndrag ? " kg-grabbing" : ""), style: { width: (cw * scale) + "px", height: (ch * scale) + "px" } },
           h("svg", {
@@ -2197,6 +2564,24 @@
     // debug handle (harmless; headless probes assert through this)
     window.__KG_NEST__ = { parentOf: nest.parentOf, items: items.map(function (i) { return i.id; }), byName: Object.keys(byName) };
 
+    // v16: natural-size metadata for one group child — busy profile cards
+    // report their HUG box, collapsed ones their strip width, nested groups
+    // recurse through groupHugSize. Feeds colPackSlots / groupHugSize.
+    function kidMeta(k) {
+      if (k.kind === "prof") {
+        var pn = panels[k.prof.name];
+        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) {
+          var tok = nest.kidTok(k), manW = stripWs[tok] ? Math.max(STRIP_RESIZE_MIN, stripWs[tok]) : 0;
+          return { slim: 1, sw: manW || stripW(k.prof.name) };
+        }
+        var m = pn && pn.model;
+        var sz = (m && (m.width > 0 || m.height > 0)) ? cardHugSize(m.width, m.height) : { w: PDEF_W, h: PDEF_H };
+        return { w: sz.w, h: sz.h };
+      }
+      if (nest.visBlocks(k) === 0) return { slim: 1, sw: stripW(nest.kidName(k)) };
+      return groupHugSize(k.children.map(kidMeta), Math.max(300, csizeRef.current.h - 140), Math.max(420, csizeRef.current.w - 80));
+    }
+
     // stored (manual) rects win; anything without one takes the first free slot
     // v10: a profile card that paints no blocks renders as a title-row strip;
     // stored rects are never rewritten, so it expands back the moment a block
@@ -2236,14 +2621,15 @@
       var strips = items.filter(function (it) { return !!slimIds[it.id]; });
       var stripWidths = strips.map(shelfW);
       // v13: every busy card's default slot is its HUG size — profile cards
-      // wrap their block grid (+ small gap); group containers keep the group
-      // minimum, their own layout is content-aware inside that.
+      // wrap their block grid (+ small gap); v16: group containers hug their
+      // column-first content too (was a fixed PDEF box that wasted space).
       var fullSizes = fulls.map(function (it) {
         if (it.kind === "prof") {
           var pn = panels[it.prof.name];
           var m = pn && pn.model;
           if (m && (m.width > 0 || m.height > 0)) return cardHugSize(m.width, m.height);
         }
+        if (it.kind === "group") return groupHugSize(it.children.map(kidMeta), Math.max(300, csize.h - 140), Math.max(560, csize.w - 2 * PGAP));
         return { w: PDEF_W, h: PDEF_H };
       });
       var plan = wallPlan(csize.w, csize.h, fullSizes, stripWidths);
@@ -2306,7 +2692,9 @@
       function fill(gid, cfg, kids, cardR) {
         var body = groupBody(cardR);
         var toks = kids.map(nest.kidTok);
-        var ir = innerLayout(toks, cfg.inner, body, INNER_PAD, kids.map(nest.kidWeight));
+        // v16: column-first pack (busy stacked wide, strips at the bottom) —
+        // the weighted treemap is retired for the default layout.
+        var ir = innerLayoutV16(toks, cfg.inner, body, kids.map(kidMeta), INNER_PAD);
         kids.forEach(function (k) {
           var t = nest.kidTok(k), q = ir[t];
           if (!q) return;
@@ -2338,7 +2726,7 @@
       });
       nestAbsRef.current = abs;
       return out;
-    }, [items, shown, panels, props.hideSt, nest]);
+    }, [items, shown, panels, props.hideSt, nest, stripWs]);
 
     var inv = useMemo(function () {
       if (!frozenInRef.current) return innerRects;
@@ -2363,6 +2751,22 @@
       setLayout(nxt);
       writeLayout(keyRef.current, nxt);
     }
+    // v17 (user 2026-10-12): a refresh must NOT reshuffle the wall. The first
+    // time a card has no stored slot we PIN the computed default into the
+    // layout; from then on only manual drags move it, and a full re-flow
+    // happens exactly when 自动排列 is clicked.
+    useEffect(function () {
+      if (activeOp || frozenRef.current) return;
+      var cur = layoutRef.current || {}, nxt = null, id, r;
+      for (id in rects) {
+        r = rects[id];
+        if (!r || cur[id]) continue;
+        if (!(r.w > 0 && r.h > 0)) continue;
+        nxt = nxt || Object.assign({}, cur);
+        nxt[id] = { x: r.x, y: r.y, w: r.w, h: r.h };
+      }
+      if (nxt) applyLayout(nxt);
+    }, [rects]);
     function applyGroups(arr) {
       var clean = sanitizeGroups((arr || []).filter(function (c) { return c && c.id && Array.isArray(c.members); }));
       gcfgRef.current = clean;
@@ -2929,6 +3333,7 @@
           var m = pn && pn.model;
           if (m && (m.width > 0 || m.height > 0)) return cardHugSize(m.width, m.height);
         }
+        if (it.kind === "group") return groupHugSize(it.children.map(kidMeta), Math.max(300, H - 140), Math.max(560, W - 2 * PGAP));
         return { w: PDEF_W, h: PDEF_H };
       });
       var plan = wallPlan(W, H, fullSizes, slim.map(shelfW));
@@ -2987,6 +3392,11 @@
         title: "跨 profile 依赖连线",
         onClick: function () { var v = !showCross; setShowCross(v); lsSet(LS_XEDGE, v ? "1" : "0"); }
       }, "跨链 " + grouped.cross.length),
+      h(Button, {
+        size: "sm", variant: props.lineMode === "curve" ? "default" : "outline",
+        title: "依赖连线样式：曲线=同行/列直线、跨行列圆弧绕行；直线=直角折线",
+        onClick: props.onLineMode
+      }, "连线 " + (props.lineMode === "curve" ? "曲线" : "直线")),
       h("span", { className: "kg-chips" }, profChips),
       h("span", { className: "kg-chip" }, "任务 " + totals.nodes),
       h("span", { className: "kg-chip" }, "边 " + totals.edges),
@@ -3379,6 +3789,8 @@
     s = useState(null); var error = s[0], setError = s[1];
     s = useState(0); var reloadKey = s[0], setReloadKey = s[1];
     s = useState(readHide); var hideSt = s[0], setHideSt = s[1];
+    // v17 (user): edge style switch — shared by both views, persisted.
+    s = useState(readLineMode); var lineMode = s[0], setLineSt = s[1];
     s = useState(null); var detail = s[0], setDetail = s[1];
 
     // board list once, then pick the board (single-board view)
@@ -3472,7 +3884,13 @@
       boards: boards, board: board, setBoard: setBoard,
       scope: scope, setScope: setScope,
       graphs: graphs, error: error,
-      hideSt: hideSt, toggleSt: toggleSt, onReload: onReload, onTask: openTask
+      hideSt: hideSt, toggleSt: toggleSt, onReload: onReload, onTask: openTask,
+      lineMode: lineMode,
+      onLineMode: function () {
+        var m = lineMode === "curve" ? "straight" : "curve";
+        writeLineMode(m);
+        setLineSt(m);
+      }
     };
 
     return h("div", { className: "kg-root" },
@@ -3483,6 +3901,7 @@
   // internals exposed for headless acceptance tests (no UI dependency)
   window.__KG_TEST__ = {
     buildModel: buildModel, buildView: buildView, orthPath: orthPath, snapCell: snapCell,
+    edgeAnchors: edgeAnchors, edgePathGeo: edgePathGeo, readLineMode: readLineMode,
     groupByProfile: groupByProfile, mergeGraphs: mergeGraphs, buildPanels: buildPanels,
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
     rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
@@ -3497,6 +3916,8 @@
     snapMove: snapMove, snapResize: snapResize, crossPath: crossPath, overlaps: overlaps,
     unionRect: unionRect, groupBody: groupBody, clampInnerRect: clampInnerRect,
     innerLayout: innerLayout, nearestFree: nearestFree, pushAside: pushAside, insideRect: insideRect,
+    // v16: column-first group packing
+    colPackSlots: colPackSlots, groupHugSize: groupHugSize, innerLayoutV16: innerLayoutV16,
     hasOverlap: hasOverlap, GKEY: GKEY,
     squarifyRects: squarifyRects, weightedSlots: weightedSlots, profWeight: profWeight,
     isDoubleTap: isDoubleTap, PROF_W_EMPTY: PROF_W_EMPTY, PROF_W_BUSY: PROF_W_BUSY,
