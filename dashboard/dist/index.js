@@ -444,7 +444,7 @@
         if (sa !== sb) return sa - sb;
         return String(a.title || "").localeCompare(String(b.title || ""), "en", { numeric: true, sensitivity: "base" });
       });
-      var dmap = new Map(), pl2 = new Map(), colsN = drawn.length <= 4 ? 1 : 2;
+      var dmap = new Map(), pl2 = new Map(), colsN = ktfCols(drawn.length);
       var colRows = Math.ceil(drawn.length / colsN);
       for (k = 0; k < drawn.length; k++) {
         dmap.set(drawn[k].id, drawn[k]);
@@ -654,7 +654,27 @@
       if (placed.has(ids[i])) continue;
       p = mdl.placed.get(ids[i]) || mdl.ulPos.get(ids[i]);
       if (!p) continue;
-      while (occ.has(p.x + "," + p.y)) p = { x: p.x, y: p.y + CH };
+      if (G.KTF) {
+        // v15 fix: in-card rescue must stay INSIDE the card. The old unbounded
+        // `p.y += CH` chain could push a block past the bottom edge (the card
+        // frame clips nothing — the block visibly leaked out of the panel).
+        // Nearest in-card lattice cell that is free; if none exists, keep the
+        // home cell (overlapping the manual block is allowed, leaving the card is not).
+        while (occ.has(p.x + "," + p.y)) {
+          var cx2, cy2, best = null, bd = 1e18;
+          for (cx2 = G.M; cx2 + G.W <= mdl.width - G.M + 0.5; cx2 += CW) {
+            for (cy2 = G.M; cy2 + G.H <= mdl.height - G.M + 0.5; cy2 += CH) {
+              if (occ.has(cx2 + "," + cy2)) continue;
+              var dd = (cx2 - p.x) * (cx2 - p.x) + (cy2 - p.y) * (cy2 - p.y);
+              if (dd < bd) { bd = dd; best = { x: cx2, y: cy2 }; }
+            }
+          }
+          if (!best) break;
+          p = best;
+        }
+      } else {
+        while (occ.has(p.x + "," + p.y)) p = { x: p.x, y: p.y + CH };
+      }
       occ.add(p.x + "," + p.y);
       placed.set(ids[i], p);
     }
@@ -883,6 +903,33 @@
     return {
       w: clamp(Math.round(mw * HUG_TS) + 2 * HUG_PAD, PMIN_W, 900),
       h: clamp(Math.round(mh * HUG_TS) + HUG_HEAD + 2 * HUG_PAD, PMIN_H, 660)
+    };
+  }
+
+  // ── v15 (user 2026-10-12): 任务块尽量占满卡片的宽度 ──────────────────────
+  // The KTF lattice had fixed block width, so after v14 stretched cards into
+  // full rows the HEIGHT fit governs scale in most busy cards and the blocks
+  // leave a side margin (real wall 2026-10-12: only 53–94% of the card width
+  // covered). Fix: when a card is height-fit-governed, widen the BLOCK itself
+  // into the leftover width — never a pixel stretch, so no text distortion —
+  // capped at KTF_WIDE_MAX so a huge card can't turn blocks into flat bands,
+  // with UNITS scaling by the same ratio so titles use the new room.
+  // Width-fit-governed cards keep base width (that blank is BELOW, v14 note).
+  var KTF_WIDE_MAX = 370; // units — 2.2x the base block (168x48), aspect guard
+  function ktfCols(n) { return n <= 4 ? 1 : 2; }
+  function ktfEffGeo(n, w, h, cap) {
+    var G0 = GEO_MINI;
+    if (!(n > 0 && w > 4 && h > 4)) return { geo: G0, changed: false };
+    var c = ktfCols(n), r = Math.ceil(n / c);
+    var vw0 = G0.M * 2 + c * G0.W + (c - 1) * G0.GX;
+    var vh0 = G0.M * 2 + r * G0.H + (r - 1) * G0.GY;
+    var s0 = clamp(Math.min((w - 4) / vw0, (h - 4) / vh0), MINI_SCALE_MIN, cap || MINI_SCALE_MAX);
+    if (!(s0 > 0)) return { geo: G0, changed: false };
+    var Wr = clamp(Math.floor(((w - 4) / s0 - G0.M * 2 - (c - 1) * G0.GX) / c), G0.W, KTF_WIDE_MAX);
+    if (Wr <= G0.W) return { geo: G0, changed: false };
+    return {
+      geo: Object.assign({}, G0, { W: Wr, UNITS: Math.max(G0.UNITS, Math.round(G0.UNITS * Wr / G0.W)) }),
+      changed: true
     };
   }
   // v13: row-first packing for VARIABLE-width hug cards. Cards pack into a row
@@ -1757,7 +1804,9 @@
 
   // ─────────────────── one profile panel (measured + fitted) ───────────────────
   function PanelBody(props) {
-    var s, p = props.panel, G = GEO_MINI;
+    var s, p = props.panel;
+    var cap = props.big ? MINI_SCALE_MAX_BIG : MINI_SCALE_MAX;
+    var scale = 1;
     s = useState({ w: 0, h: 0 }); var size = s[0], setSize = s[1];
     s = useState(function () { return readMiniPos(props.pid); }); var ov = s[0], setOv = s[1];
     s = useState(false); var ndrag = s[0], setNdrag = s[1];
@@ -1783,11 +1832,23 @@
     // "排列" on the card clears this profile's manual block positions
     useEffect(function () { setOv(readMiniPos(props.pid)); }, [props.ver, props.pid]);
 
+    // v15 (user 2026-10-12): the block grid RE-FITS to the card. Once fillWall
+    // stretched a card the height fit governed scale and blocks left a side
+    // margin — ktfEffGeo hands that leftover to the block width itself (aspect
+    // guarded). Width-governed cards keep the base lattice, as before.
+    var eff = useMemo(function () {
+      return ktfEffGeo(p.model.nodeMap.size, size.w, size.h, cap);
+    }, [p.model, size.w, size.h, cap]);
+    var G = eff.geo;
+    var mdl = useMemo(function () {
+      if (!eff.changed) return p.model;
+      return buildModel({ nodes: p.group.nodes, edges: p.group.edges, back_edges: p.group.backEdges }, true, eff.geo);
+    }, [p.model, eff, p.group]);
+    var cometMini = eff.changed ? cometD(G) : COMET_D_MINI;
+
     // the drawing area is pinned to the *auto* layout box (not the live view box)
     // so dragging a block never rescales the whole card mid-gesture
-    var vw = Math.max(1, p.model.width), vh = Math.max(1, p.model.height);
-    var cap = props.big ? MINI_SCALE_MAX_BIG : MINI_SCALE_MAX;
-    var scale = 1;
+    var vw = Math.max(1, mdl.width), vh = Math.max(1, mdl.height);
     if (size.w > 4 && size.h > 4) {
       scale = clamp(Math.min((size.w - 4) / vw, (size.h - 4) / vh), MINI_SCALE_MIN, cap);
     }
@@ -1814,8 +1875,8 @@
           o2[kk] = { x: clamp(q.x, box.x0, box.x1), y: clamp(q.y, box.y0, box.y1) };
         }
       }
-      return buildView(p.model, o2);
-    }, [p.model, ov, cw, ch, offX, offY]);
+      return buildView(mdl, o2);
+    }, [mdl, ov, cw, ch, offX, offY]);
     var viewRef = useRef(view); viewRef.current = view;
     var boxRef = useRef(null);
     boxRef.current = blockBoxOf(cw, ch, offX, offY, G);
@@ -1928,19 +1989,19 @@
           markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
         }, h("path", { className: "kg-arrow", d: "M 0 0 L 10 5 L 0 10 z" })));
       kids.push(defs);
-      kids = kids.concat(renderEdges(p.model, view, props.hideSt, "kga-" + props.pid, ""));
+      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, ""));
       var ordered = [];
-      p.model.nodeMap.forEach(function (n) { ordered.push(n); });
+      mdl.nodeMap.forEach(function (n) { ordered.push(n); });
       ordered.forEach(function (n) {
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: "", comet: COMET_D_MINI, metaOf: props.metaOf, handlers: handlersFor(n) }));
+        kids.push(renderNode(n, pos, G, { cls: "", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n) }));
       });
       p.group.nodes.forEach(function (n) {
-        if (p.model.nodeMap.has(n.id)) return;
+        if (mdl.nodeMap.has(n.id)) return;
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: " kg-uln", comet: COMET_D_MINI, metaOf: props.metaOf, handlers: handlersFor(n) }));
+        kids.push(renderNode(n, pos, G, { cls: " kg-uln", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n) }));
       });
     }
     var body;
@@ -3412,6 +3473,7 @@
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
     rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
     hugPack: hugPack, cardHugSize: cardHugSize, fillWall: fillWall,
+    ktfCols: ktfCols, ktfEffGeo: ktfEffGeo, KTF_WIDE_MAX: KTF_WIDE_MAX,
     HUG_TS: HUG_TS, STRIP_GAP: STRIP_GAP, STRIP_RESIZE_MIN: STRIP_RESIZE_MIN,
     shelfRows: shelfRows, stripW: stripW,
     GTOK: GTOK, isTok: isTok, tokGid: tokGid, NEST_MAX: NEST_MAX,
