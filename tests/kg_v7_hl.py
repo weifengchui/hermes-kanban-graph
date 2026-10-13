@@ -484,17 +484,16 @@ with sync_playwright() as pw:
     blocks = page.eval_on_selector_all(tsel + " .kg-mini .kg-node", "e => e.length")
     ok("the card draws task blocks", blocks >= 2, blocks)
     first_block = page.query_selector(tsel + " .kg-mini .kg-node")
-    # v14 walls run taller than the fold, so a block's centre can sit below the
-    # viewport -- mouse.down() there is a silent miss and the drag looks like "the
-    # block refuses to move". Walk the board scroller until it is comfortably in
-    # frame, aim with that same measurement, and assert reachability (fail loudly).
+    # v14 walls run taller than the fold; v22.1 ADDED a second scroller (the
+    # card's own .kg-pbody, readability floor) — scrolling .kg-board alone can
+    # never reveal a block clipped inside a body. Use element-level
+    # scrollIntoView, which walks ALL ancestor scrollers, then aim fresh.
     bb = None
     for _ in range(20):
         bb = first_block.bounding_box()
         if bb and bb["y"] >= 60 and bb["y"] + bb["height"] <= 860:
             break
-        page.evaluate("""(sel) => { const el = document.querySelector(sel + ' .kg-mini .kg-node');
-          if (!el) return; (el.closest('.kg-board') || el.parentElement.parentElement).scrollTop += 240; }""", tsel)
+        page.evaluate("(el) => el.scrollIntoView({ block: 'center' })", first_block)
         page.wait_for_timeout(120)
     ok("the task block is reachable inside the viewport",
        bool(bb) and bb["y"] >= 0 and bb["y"] + bb["height"] <= 900, bb and [round(bb["x"]), round(bb["y"])])

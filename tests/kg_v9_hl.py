@@ -279,10 +279,20 @@ with sync_playwright() as pw:
     if len(mem) == 2:
         busy = max(mem, key=lambda m: m["n"])
         idle = min(mem, key=lambda m: m["n"])
-        ok("默认布局：任务多的成员更大",
-           busy["n"] > idle["n"] and busy["w"] * busy["h"] > idle["w"] * idle["h"] * 1.2,
-           "%s(%d)=%dx%d vs %s(%d)=%dx%d" % (busy["prof"], busy["n"], busy["w"], busy["h"],
-                                             idle["prof"], idle["n"], idle["w"], idle["h"]))
+        # v22.1 (user 10-13): count-proportional sizing is RETIRED — task blocks
+        # keep one fixed readable size (display scale >= 1); a busier member
+        # overflows by SCROLLING its body, never by shrinking text.
+        sc = page.evaluate("""() => { const out = [];
+          document.querySelectorAll('.kg-group .kg-panel').forEach(p => {
+            const svg = p.querySelector('svg.kg-mini'); if (!svg) return;
+            const vb = (svg.getAttribute('viewBox') || '').trim().split(' ').map(Number);
+            const w = parseFloat(svg.getAttribute('width')) || 0;
+            out.push({ prof: p.dataset.prof, scale: vb[2] ? +(w / vb[2]).toFixed(3) : 1 });
+          }); return out; }""")
+        ok("默认布局：块固定可读（scale>=1），忙面板滚动不缩块",
+           bool(sc) and all(x["scale"] >= 0.995 for x in sc),
+           {"scales": sc, "busy": "%s(%d)=%dx%d" % (busy["prof"], busy["n"], busy["w"], busy["h"]),
+            "idle": "%s(%d)=%dx%d" % (idle["prof"], idle["n"], idle["w"], idle["h"])})
     ga = page.eval_on_selector_all(".kg-group .kg-gauto", "e => e.map(x => x.textContent)")
     ok("the group card carries an 自动排列 button", ga == ["\u81ea\u52a8\u6392\u5217"], ga)
 
@@ -331,10 +341,18 @@ with sync_playwright() as pw:
     if len(mem2) == 2:
         b2 = max(mem2, key=lambda m: m["n"])
         i2 = min(mem2, key=lambda m: m["n"])
-        ok("分组自动排列：有任务块的放大、无任务块的缩小",
-           b2["w"] * b2["h"] > i2["w"] * i2["h"] * 1.2,
-           "%s(%d)=%dx%d vs %s(%d)=%dx%d" % (b2["prof"], b2["n"], b2["w"], b2["h"],
-                                             i2["prof"], i2["n"], i2["w"], i2["h"]))
+        # v22.1 rebase: same readability floor after the group auto-arrange.
+        sc2 = page.evaluate("""() => { const out = [];
+          document.querySelectorAll('.kg-group .kg-panel').forEach(p => {
+            const svg = p.querySelector('svg.kg-mini'); if (!svg) return;
+            const vb = (svg.getAttribute('viewBox') || '').trim().split(' ').map(Number);
+            const w = parseFloat(svg.getAttribute('width')) || 0;
+            out.push({ prof: p.dataset.prof, scale: vb[2] ? +(w / vb[2]).toFixed(3) : 1 });
+          }); return out; }""")
+        ok("分组自动排列后块仍固定可读（scale>=1）",
+           bool(sc2) and all(x["scale"] >= 0.995 for x in sc2),
+           {"scales": sc2, "busy": "%s(%d)=%dx%d" % (b2["prof"], b2["n"], b2["w"], b2["h"]),
+            "idle": "%s(%d)=%dx%d" % (i2["prof"], i2["n"], i2["w"], i2["h"])})
     page.screenshot(path=SHOTS + "/v9_02_group_arrange.png")
 
     # restore the full wall for the sections below (the deliberately emptied
@@ -445,6 +463,11 @@ with sync_playwright() as pw:
     # the pinned card (kg-pinner) floats above the wall and can cover heads —
     # pick the first candidate whose head-centre actually hits its own card
     for cand in gc + [c for c in page.evaluate(CARDS) if c["kind"] != "group"]:
+        # v22.1: collapsed STRIP cards (32px shelf) resize WIDTH on drag and draw
+        # NO grid by design (live data can turn a profile into a strip any day) —
+        # only busy cards (h>100) are valid grid witnesses.
+        if cand["kind"] != "group" and cand["h"] <= 100:
+            continue
         _sel = (".kg-surface > .kg-group[data-gid=\"%s\"]" % cand["id"] if cand["kind"] == "group"
                 else '.kg-surface > .kg-panel[data-prof="%s"]' % cand["id"])
         try:
@@ -519,6 +542,13 @@ with sync_playwright() as pw:
         page.wait_for_timeout(250)
         lay_pre = page.evaluate("JSON.parse(localStorage.getItem('hermes.kanbangraph.layout.__all__')||'{}')")
         pre = lay_pre.get(s["id"])
+        # v22 doctrine: the DEFAULT wall is live — nothing is in the store until
+        # the user moves a card. Pre-drag slot therefore comes from the DOM
+        # (surface coords, the same space the stored rects use).
+        if not pre:
+            pre = page.evaluate("""(sel) => { const el=document.querySelector(sel);
+              const surf=document.querySelector('.kg-surface').getBoundingClientRect();
+              const r=el.getBoundingClientRect(); return {x:r.left-surf.left, y:r.top-surf.top, w:r.width, h:r.height}; }""", ss)
         hx, hy = head_xy(page, ss)
         ok("solo 卡已滚进可拖区（吸附判据的前提）", bool(pre) and hy is not None and 60 <= hy <= 860, (hx, hy, pre))
         drag(page, (hx, hy), (hx + 101, hy + 61), steps=12)

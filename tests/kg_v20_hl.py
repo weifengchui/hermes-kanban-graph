@@ -185,7 +185,25 @@ with sync_playwright() as pw:
         lay0 = _json.loads(before)
     except Exception:
         lay0 = {}
-    ok("T21 wall auto-pinned before fullscreen (v17 pins in effect)", len(lay0) >= 4, len(lay0))
+    # v22.2 rebase: first-paint pinning is retired (skyline packer = deterministic
+    # function, store stays empty unless the USER moves a card). Contract before
+    # fullscreen: a well-formed wall — cards >= 4, no overlaps, distinct rects.
+    def wall_rects():
+        return page.evaluate("""() => { const sb=document.querySelector('.kg-board').getBoundingClientRect(); const o={};
+          document.querySelectorAll('.kg-surface > .kg-panel').forEach(el => { const b=el.getBoundingClientRect();
+            if (b.width > 20) o[el.dataset.prof]=[Math.round(b.left-sb.left),Math.round(b.top-sb.top),Math.round(b.width),Math.round(b.height)]; });
+          return o; }""")
+    def no_overlap(m):
+        ks=list(m)
+        for i in range(len(ks)):
+            for j in range(i+1,len(ks)):
+                a,b=m[ks[i]],m[ks[j]]
+                if a[0]+a[2]>b[0]+2 and b[0]+b[2]>a[0]+2 and a[1]+a[3]>b[1]+2 and b[1]+b[3]>a[1]+2:
+                    return (ks[i],ks[j])
+        return None
+    wrects0 = wall_rects()
+    ok("T21 wall packs clean before fullscreen (v22.2 deterministic packing)",
+       len(wrects0) >= 4 and no_overlap(wrects0) is None, (len(wrects0), no_overlap(wrects0)))
     btn = toolbar_fs_button(page)
     btn.click()
     ok("T22 enter fullscreen (pinned session)", wait_fullscreen(page, True))
@@ -202,34 +220,25 @@ with sync_playwright() as pw:
     ok("T23 fullscreen spreads the wall to the right edge (>=92% board width)",
        spread["maxR"] >= spread["boardW"] * 0.92, spread)
     page.click(".kg-fs-exit")
-    ok("T24 exit restores pinned session", wait_fullscreen(page, False))
+    ok("T24 exit restores the session", wait_fullscreen(page, False))
     page.wait_for_timeout(900)
-    after = page.evaluate("localStorage.getItem('hermes.kanbangraph.layout.__all__')") or "{}"
-    same = False
+    wrects1 = wall_rects()
+    same = bool(wrects0) and set(wrects0) == set(wrects1) and all(
+        all(abs(wrects0[k][a] - wrects1[k][a]) <= 3 for a in range(4)) for k in wrects0)
+    ok("T25 wall geometry restored exactly across the fullscreen cycle (v22.2 rect round-trip)", same,
+       (len(wrects0), len(wrects1), {k: (wrects0.get(k), wrects1.get(k)) for k in list(wrects0)[:2]}))
+    # v22.2: the layout store must carry ONLY user-made rects — first paint /
+    # auto-arrange / fullscreen cycles never write pins. This probe never drags
+    # a WALL card (only inner blocks), so the store staying near-empty is the
+    # no-pin-flood contract itself.
     try:
-        same = _json.loads(after) == lay0
+        layB = _json.loads(page.evaluate("localStorage.getItem('hermes.kanbangraph.layout.__all__')") or "{}")
     except Exception:
-        same = False
-    ok("T25 pinned layout byte-restored across the fullscreen cycle", same,
-       (len(lay0), len(_json.loads(after) or {})))
-    key0 = None
-    for k in sorted(lay0):
-        if k and isinstance(lay0[k], dict) and "x" in lay0[k] and not str(k).startswith("@g"):
-            key0 = k
-            break
-    ok("T26a stored layout has a checkable prof rect", key0 is not None,
-       sorted(lay0)[:6])
-    rest = page.evaluate("""(k) => {
-      const lay = JSON.parse(localStorage.getItem('hermes.kanbangraph.layout.__all__')||'{}');
-      const el = document.querySelector('.kg-surface > .kg-panel[data-prof=\\'' + k + '\\']');
-      if (!el) return { why: 'no-el', k: k, panels: document.querySelectorAll('.kg-surface > .kg-panel').length, keys: Object.keys(lay).length };
-      if (!lay[k]) return { why: 'no-key', k: k };
-      const sb = document.querySelector('.kg-board').getBoundingClientRect();
-      const b = el.getBoundingClientRect();
-      return { dx: (b.left - sb.left) - lay[k].x, dy: (b.top - sb.top) - lay[k].y };
-    }""", key0) if key0 else None
-    ok("T26 stored card back at its saved spot after exit",
-       bool(rest) and "dx" in rest and abs(rest["dx"]) <= 3 and abs(rest["dy"]) <= 3, rest)
+        layB = {}
+    ok("T26 no pin flood after the fullscreen cycle (store stays <=2 keys)",
+       len(layB) <= 2, sorted(layB)[:6])
+    # (v21-era T26a/T26 stored-pin checks deleted in the v22.2 rebase — the
+    # pin mechanism they guarded is retired; T25/T26 above cover the contract)
 
     # ── v20.3: status bar removed (user: 感觉没有太大价值，直接去掉) ──
     gone = page.evaluate("""() => ({

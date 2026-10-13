@@ -90,8 +90,12 @@ def main():
         lay1 = json.loads(ls(pg, "layout.__all__") or "{}")
         cards = pg.evaluate("""() => [...document.querySelectorAll('.kg-surface > .kg-panel')]
             .map(el => el.dataset.prof).filter(Boolean)""")
-        ok("all wall cards pinned after first paint",
-           len([c for c in cards if c in lay1]) >= max(1, len(cards) - 1),
+        # v22.2 rebase: first-paint pinning was RETIRED with the skyline packer —
+        # slots are a deterministic function of the board; nothing enters the
+        # store unless the user moves a card. Reload stability (geo0 vs geo1
+        # below) is the surviving contract; the store must stay pin-free.
+        ok("v22.2: no pin flood after first paint (<=2 store keys)",
+           len([c for c in cards if c in lay1]) <= 2,
            {"cards": cards, "lay": list(lay1)})
         geo0 = pg.evaluate("""(pid) => { const el = document.querySelector(`.kg-surface > .kg-panel[data-prof="${pid}"]`);
           const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; }""", pid)
@@ -107,8 +111,27 @@ def main():
             `.kg-surface > .kg-panel[data-prof="${pid}"]`).scrollIntoView({block: 'center'})""", pid)
         pg.wait_for_timeout(500)
         blocks = read_blocks(pg, pid)
+        # v22.1: the card body now SCROLLS (readability floor) — the lowest block
+        # of a busy wall sits under the fold and a pointer aimed outside the
+        # viewport silently CANCELS the grip drag (top-left-drop probe class,
+        # repeat). Pick the lowest FULLY-VISIBLE block; scroll to top otherwise.
+        def body_rect():
+            return pg.evaluate("""(pid) => { const pb=document.querySelector(
+              `.kg-surface > .kg-panel[data-prof="${pid}"] .kg-pbody`);
+              const r=pb.getBoundingClientRect(); return {t:r.top,b:r.bottom,l:r.left,rt:r.right}; }""", pid)
+        vis = body_rect()
+        def _vis(bs):
+            return [z for z in bs if z["y"] >= vis["t"] - 2 and z["y"] + z["h"] <= vis["b"] + 2
+                    and z["x"] >= vis["l"] - 2 and z["x"] + z["w"] <= vis["rt"] + 2]
+        onscreen = _vis(blocks)
+        if not onscreen:
+            pg.evaluate("""(pid) => { document.querySelector(
+              `.kg-surface > .kg-panel[data-prof="${pid}"] .kg-pbody`).scrollTop = 0; }""", pid)
+            pg.wait_for_timeout(300)
+            blocks = read_blocks(pg, pid); vis = body_rect(); onscreen = _vis(blocks)
+        ok("a block fully visible in the scrolling body (drag precondition)", bool(onscreen), (len(blocks), len(onscreen)))
         base_uw = blocks[0]["uw"]
-        tgt = max(blocks, key=lambda z: z["y"])  # the lowest block has room below
+        tgt = max(onscreen or blocks, key=lambda z: z["y"])  # lowest VISIBLE block has room below
         hx, hy = tgt["x"] + tgt["w"] - 5, tgt["y"] + tgt["h"] - 5
         pg.mouse.move(hx, hy)
         pg.wait_for_timeout(150)
@@ -158,8 +181,13 @@ def main():
             `.kg-surface > .kg-panel[data-prof="${pid}"]`).scrollIntoView({block: 'center'})""", pid)
         pg.wait_for_timeout(300)
         blocks4 = read_blocks(pg, pid)
-        ok("blocks back on the base lattice", blocks4 and all(z["uw"] <= base_uw + 0.6 for z in blocks4),
-           [z["uw"] for z in blocks4])
+        # v22.1 rebase: ktfEffGeo hands leftover height to block WIDTH by design
+        # (the v15 rule) and the readability floor pins scale at >=1. The lattice
+        # is therefore per-card; the invariant is ONE uniform width inside the
+        # card and never below the readable floor (>=214.5, base 215).
+        uws = sorted({round(z["uw"], 1) for z in blocks4})
+        ok("blocks on ONE uniform lattice after \u6392\u5217, >= readable floor",
+           bool(blocks4) and len(uws) == 1 and uws[0] >= 214.5, uws)
 
         # ── T9: dependency-first DOM order matches the recomputed model ──
         truth = pg.evaluate("""(pid) => {

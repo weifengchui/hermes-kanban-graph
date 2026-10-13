@@ -141,7 +141,7 @@
   var GKEY = "@g"; // layout-map key prefix marking a group card
 
   // wall-of-panels tuning
-  var GRID = 8, SNAP = 8, PMIN_W = 240, PMIN_H = 150, PDEF_W = 460, PDEF_H = 330, PGAP = 12, MINI_SCALE_MIN = 0.5, MINI_SCALE_MAX = 3.0; // v14: blocks fill the card (1.5 pinned them small once cards were stretched); scale = min(fitW,fitH) can never overflow, the cap is only a single-block-in-a-giant-row sanity guard
+  var GRID = 8, SNAP = 8, PMIN_W = 240, PMIN_H = 150, PDEF_W = 460, PDEF_H = 330, PGAP = 12, MINI_SCALE_MIN = 1.0, MINI_SCALE_MAX = 3.0; // v22.1 (user 10-13): READABILITY FLOOR — blocks used to shrink to 0.5x on busy walls (text unreadable). scale is now clamped to >= 1: a card always shows blocks at their natural readable size and the .kg-pbody (overflow:auto) scrolls instead. cap stays 3.0 (single-block sanity fill).
   // v13 (user 2026-10-11): cards hug their content, blocks render as large as
   // possible. HUG_TS is the target on-screen scale (block ≈ 168*1.3 ≈ 218px
   // wide vs ≈185 under the old fixed 2-col tile), HUG_PAD the small gap the
@@ -1023,6 +1023,23 @@
     };
   }
 
+  // ── v22 (user 2026-10-13): consumable height ──────────────────────────────
+  // The card grid scale is min(width-fit, height-fit) capped at MINI_SCALE_MAX;
+  // past that, EXTRA card height renders as a dead band under the blocks (the
+  // survey measured 4282px of it on a fresh 1440x900 wall). cardUsefulH(n, w)
+  // mirrors PanelBody's math (same ktfEffGeo cols choice + scale) and answers:
+  // at width w, how tall can this card get BEFORE its grid stops growing?
+  function cardUsefulH(n, w) {
+    if (!(n > 0 && w > 4)) return PMIN_H;
+    var eff = ktfEffGeo(n, w, 1e6, MINI_SCALE_MAX);
+    var G = eff.geo, c = Math.max(1, eff.cols);
+    var r = Math.ceil(n / c);
+    var vw = G.M * 2 + c * G.W + (c - 1) * G.GX;
+    var vh = G.M * 2 + r * G.H + (r - 1) * G.GY;
+    var s = Math.min((w - 4) / vw, MINI_SCALE_MAX);
+    return Math.round(vh * s) + HUG_HEAD + 2 * HUG_PAD + 8;
+  }
+
   // ── v15 (user 2026-10-12): 任务块尽量占满卡片的宽度 ──────────────────────
   // The KTF lattice had fixed block width, so after v14 stretched cards into
   // full rows the HEIGHT fit governs scale in most busy cards and the blocks
@@ -1111,6 +1128,72 @@
     return out;
   }
 
+  // ── v22 SKYLINE packing (user 2026-10-13: 自动排版有很多空白区间 浪费) ────
+  // The uniform-height row (hugPack) makes every card pay its tallest
+  // neighbour's height: a 1-block card in a 660px row dead-band 500px (the
+  // quiet survey measured 4282px of dead band on a fresh wall). Height-bucketed
+  // rows were tried first and FAILED the wide-screen fold metric (bfleet at
+  // 1.7 ratio wraps alone and eats 2241px of width).
+  // skyPack is a deterministic classic skyline: a horizontal skyline of
+  // segments; each card lands at the LOWEST position, tie-broken LEFTMOST, and
+  // raises the skyline across its own span. No bands ⇒ no forced height, the
+  // wall is the area its content deserves, order (blocks-first → name) is
+  // preserved, and the next card slides into whatever pocket is free.
+  function skyPack(sizes, W, gap) {
+    var out = [];
+    if (!sizes || !sizes.length) return out;
+    gap = gap == null ? PGAP : gap;
+    W = Math.max(1, W);
+    var inner = Math.max(PMIN_W, W - 2 * gap);
+    var segs = [{ x0: gap, x1: W - gap, y: gap }];
+    for (var i = 0; i < sizes.length; i++) {
+      var w = Math.max(PMIN_W, Math.min(sizes[i].w, inner));
+      var h = sizes[i].h;
+      // candidate x positions: every segment start (and x1-w, to slot into
+      // pockets flush-right against a tall neighbour) that fits its span
+      var cands = [], c, q;
+      for (q = 0; q < segs.length; q++) {
+        c = segs[q].x0;
+        if (c + w <= W - gap && cands.indexOf(c) < 0) cands.push(c);
+        c = segs[q].x1 - w;
+        if (c >= gap && c + w <= W - gap && cands.indexOf(c) < 0) cands.push(c);
+      }
+      var best = null;
+      for (q = 0; q < cands.length; q++) {
+        var x0 = cands[q], y0 = gap, ok = true;
+        for (var s2 = 0; s2 < segs.length; s2++) {
+          var sg = segs[s2];
+          if (sg.x1 <= x0 || sg.x0 >= x0 + w) continue; // no x-overlap
+          if (sg.y > y0) y0 = sg.y;
+        }
+        if (!ok) continue;
+        if (!best || y0 < best.y - 0.5 || (Math.abs(y0 - best.y) <= 0.5 && x0 < best.x)) best = { x: x0, y: y0 };
+      }
+      if (!best) best = { x: gap, y: segsReduceMax(segs) + gap };
+      out.push({ x: best.x, y: best.y, w: w, h: h });
+      // raise the skyline across [best.x, best.x+w+gap) — the horizontal gap
+      // is paid into the raised span so the NEXT card's segment starts clear
+      // of this one (v22 unit caught the flush-touch version)
+      var top = best.y + h + gap;
+      var rx1 = best.x + w + gap;
+      var ns = [];
+      for (s2 = 0; s2 < segs.length; s2++) {
+        var s3 = segs[s2], x0s = s3.x0, x1s = s3.x1;
+        if (x1s <= best.x || x0s >= rx1) { ns.push(s3); continue; }
+        if (x0s < best.x) ns.push({ x0: x0s, x1: best.x, y: s3.y });
+        if (x1s > rx1) ns.push({ x0: rx1, x1: x1s, y: s3.y });
+        ns.push({ x0: Math.max(x0s, best.x), x1: Math.min(x1s, rx1), y: Math.max(s3.y, top) });
+      }
+      segs = ns;
+    }
+    return out;
+  }
+  function segsReduceMax(segs) {
+    var m = gap;
+    for (var q = 0; q < segs.length; q++) m = Math.max(m, segs[q].y);
+    return m;
+  }
+
   // v14 (user 2026-10-12): 自动排列 must SPREAD the busy cards over the whole
   // usable screen — cards fill their row edge-to-edge and the busy area fills
   // the height the shelf leaves — so the mini graph inside a card gets room to
@@ -1160,6 +1243,11 @@
     //    the busy rows may use H - gap - shelfH. Distribute the leftover to
     //    rows proportionally to their natural height. No leftover ⇒ no stretch
     //    (and NEVER shrink: that was the v11.1 squeeze the user rejected).
+    //    v22 (user 2026-10-13): when the caller hands us block counts (`n`),
+    //    each row may only grow to the height ALL its cards can still DIGEST
+    //    (min cardUsefulH at the stretched widths) — past that the extra is a
+    //    dead band under the blocks. Uncapped legacy callers keep the old
+    //    proportional spread.
     var natTotal = gap;
     order.forEach(function (k) { natTotal += rowH[k]; });
     natTotal += gap * (order.length - 1);
@@ -1167,13 +1255,31 @@
     var shelfH = shelfN > 0 ? shelfN * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + STRIP_GAP : 0;
     var availH = Math.max(0, H - shelfH);
     var extraH = availH - natTotal;
+    var capped = false;
+    for (i = 0; i < sizes.length; i++) if (sizes[i] && sizes[i].n > 0) { capped = true; break; }
     if (extraH > 0) {
-      var usedH = 0;
-      order.forEach(function (k, t) {
-        var add = t === order.length - 1 ? extraH - usedH : Math.floor(extraH * (rowH[k] / natTotal));
-        usedH += add;
-        rowH[k] += add;
-      });
+      if (capped) {
+        var wants = {}, wantSum = 0;
+        order.forEach(function (k) {
+          var cap = Infinity;
+          rows[k].forEach(function (j) {
+            var s = sizes[j];
+            var c = s && s.n > 0 ? cardUsefulH(s.n, lay[j].w) : lay[j].h;
+            if (c < cap) cap = c;
+          });
+          wants[k] = Math.max(0, Math.round(Math.max(cap, rowH[k]) - rowH[k]));
+          wantSum += wants[k];
+        });
+        var wratio = wantSum > 0 ? Math.min(1, extraH / wantSum) : 0;
+        order.forEach(function (k) { rowH[k] += Math.round(wants[k] * wratio); });
+      } else {
+        var usedH = 0;
+        order.forEach(function (k, t) {
+          var add = t === order.length - 1 ? extraH - usedH : Math.floor(extraH * (rowH[k] / natTotal));
+          usedH += add;
+          rowH[k] += add;
+        });
+      }
     }
     // 3) re-stack BOTH axes: the widths above changed, so the row's x chain has
     //    to be rebuilt too (v14 first cut kept hugPack's natural x and the
@@ -1200,7 +1306,10 @@
   function wallPlan(W, H, fullSizes, slimWidths) {
     fullSizes = fullSizes || [];
     slimWidths = slimWidths || [];
-    var busy = fillWall(W, H, fullSizes, slimWidths, PGAP);
+    // v22: busy area = SKYLINE (every card at its content-hug size, pockets
+    // filled — see skyPack). fillWall's uniform-row + stretch stays exported
+    // for legacy unit probes but no longer shapes the wall.
+    var busy = skyPack(fullSizes, W, PGAP);
     var shelfRowsN = shelfRows(slimWidths, W, STRIP_GAP);
     var shelfH = shelfRowsN > 0 ? shelfRowsN * (STRIP_H + STRIP_VGAP) - STRIP_VGAP + STRIP_GAP : 0;
     // v13.1: NO height squeeze — the user asked for blocks as large as possible,
@@ -2704,7 +2813,11 @@
         if (it.kind === "prof") {
           var pn = panels[it.prof.name];
           var m = pn && pn.model;
-          if (m && (m.width > 0 || m.height > 0)) return cardHugSize(m.width, m.height);
+          if (m && (m.width > 0 || m.height > 0)) {
+            var hs = cardHugSize(m.width, m.height);
+            hs.n = m.nodeMap.size; // v22: fillWall digest cap
+            return hs;
+          }
         }
         if (it.kind === "group") return groupHugSize(it.children.map(kidMeta), Math.max(300, csize.h - 140), Math.max(560, csize.w - 2 * PGAP));
         return { w: PDEF_W, h: PDEF_H };
@@ -2856,32 +2969,17 @@
       });
     }, [gcfg, panels, props.hideSt, hidden]);
 
-    // v17 (user 2026-10-12): a refresh must NOT reshuffle the wall. The first
-    // time a card has no stored slot we PIN the computed default into the
-    // layout; from then on only manual drags move it, and a full re-flow
-    // happens exactly when 自动排列 is clicked.
-    var pinStableRef = useRef(null);
-    useEffect(function () {
-      if (activeOp || frozenRef.current) return;
-      var cur = layoutRef.current || {}, nxt = null, id, r;
-      for (id in rects) {
-        r = rects[id];
-        if (!r || cur[id]) continue;
-        if (!(r.w > 0 && r.h > 0)) continue;
-        nxt = nxt || Object.assign({}, cur);
-        nxt[id] = { x: r.x, y: r.y, w: r.w, h: r.h };
-      }
-      if (!nxt) return;
-      // v18 stability gate: the first frames of a fresh wall are still settling
-      // (measure → hug → strip decide → fillWall stretch). PINNING THAT snapshot
-      // froze mid-animation geometry that the 自动排列 button no longer matched
-      // (v14 probe, 10-12). Only pin a missing-slot set that repeats two rounds
-      // in a row — a wall still moving keeps re-surveying instead of freezing.
-      var sig = JSON.stringify(nxt);
-      if (pinStableRef.current !== sig) { pinStableRef.current = sig; return; }
-      applyLayout(nxt);
-      pinStableRef.current = null;
-    }, [rects]);
+    // v17 (2026-10-12) auto-PINNED the first computed slot into the layout so
+    // refreshes wouldn't reshuffle. That design is RETIRED (v22, user
+    // 2026-10-13 "自动排版有很多空白区间浪费"): the wall grows board-by-board
+    // as /graph responses land, so there is NO stable frame to pin against —
+    // any frame that pins twice-in-a-row can be a partial one, and a pinned
+    // partial slot never re-flows when the real content arrives. The quiet
+    // survey caught it red-handed: 36 blocks pinned into a 150px strip, 1
+    // block pinned at 361px. Defaults are now ALWAYS live (deterministic for
+    // the same data), manual rects still win forever (v21 doctrine), and a
+    // full persist happens exactly when 自动排列 is clicked.
+    // (No effect here on purpose — do NOT re-add a silent auto-persist.)
     function applyGroups(arr) {
       var clean = sanitizeGroups((arr || []).filter(function (c) { return c && c.id && Array.isArray(c.members); }));
       gcfgRef.current = clean;
@@ -3488,10 +3586,29 @@
         if (it.kind === "prof") {
           var pn = panels[it.prof.name];
           var m = pn && pn.model;
-          if (m && (m.width > 0 || m.height > 0)) return cardHugSize(m.width, m.height);
+          if (m && (m.width > 0 || m.height > 0)) {
+            var hs = cardHugSize(m.width, m.height);
+            hs.n = m.nodeMap.size; // v22: fillWall digest cap
+            return hs;
+          }
         }
         if (it.kind === "group") return groupHugSize(it.children.map(kidMeta), Math.max(300, H - 140), Math.max(560, W - 2 * PGAP));
         return { w: PDEF_W, h: PDEF_H };
+      });
+      // v22 (user 2026-10-13): 顶栏自动排列 = 一次「全部归位」——卡片重排之外，
+      // 每张可见卡的 task block 也清掉旧的钉住位置回到点阵（v21 口径里顶栏按钮
+      // 本就是归位入口，此前只有卡片级按钮实现了它）。不清 miniPos 的话，旧几何
+      // 钉住的块会被夹到改过尺寸的卡边缘——正是这次普查出的「右缘一竖条」死区。
+      // v17 pin guard: read the hidden set FRESH from the store (the callback
+      // closure would see stale chips; same disease as v21 toggleProf).
+      var hiddenNow = readHiddenProf();
+      items.forEach(function (it) {
+        if (it.kind === "prof" && !hiddenNow[it.prof.name]) arrangeBlocks(it.prof.name);
+      });
+      gcfgRef.current.forEach(function (c) {
+        c.members.forEach(function (mm) {
+          if (!isTok(mm) && byName[mm] && !hiddenNow[mm]) arrangeBlocks(mm);
+        });
       });
       var plan = wallPlan(W, H, fullSizes, slim.map(shelfW));
       var slots = plan.busy;
@@ -4086,6 +4203,7 @@
     neededSlugs: neededSlugs, tileRects: tileRects, pickFreeSlot: pickFreeSlot,
     rowPack: rowPack, shelfPack: shelfPack, wallPlan: wallPlan,
     hugPack: hugPack, cardHugSize: cardHugSize, fillWall: fillWall,
+    cardUsefulH: cardUsefulH, skyPack: skyPack,
     ktfCols: ktfCols, ktfEffGeo: ktfEffGeo, KTF_WIDE_MAX: KTF_WIDE_MAX,
     HUG_TS: HUG_TS, STRIP_GAP: STRIP_GAP, STRIP_RESIZE_MIN: STRIP_RESIZE_MIN,
     shelfRows: shelfRows, stripW: stripW,

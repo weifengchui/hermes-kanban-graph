@@ -91,7 +91,11 @@ def main():
         wait_quiet(pg)
         lay = json.loads(ls(pg, "layout.__all__") or "{}")
         rects0 = card_rects(pg)
-        ok("wall pinned after settle (layout non-empty)", len(lay) >= len(rects0) - 1, (list(lay), list(rects0)))
+        # v22.2 rebase: settle no longer PINS the wall — packing is derived.
+        # Contract: the store stays free of auto-pins; the reload-stability
+        # assertion right below is the surviving lock.
+        ok("wall NOT auto-pinned after settle (v22.2 store stays small)",
+           len(lay) <= 2, (list(lay), list(rects0)))
         pg.reload(wait_until="networkidle")
         pg.wait_for_timeout(2600)
         wait_quiet(pg)
