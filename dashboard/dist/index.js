@@ -759,9 +759,11 @@
     return { x0: x0, y0: y0, x1: Math.max(x0, cw - offX - G.W), y1: Math.max(y0, ch - offY - G.H) };
   }
 
-  // Merge free/magneted drag positions over the layered layout. Manual positions
-  // render verbatim (smooth while dragging); their nearest cell is claimed so
-  // auto/lattice nodes shift down instead of ever sharing a cell with anything.
+  // Merge free/magneted drag positions over the layered layout. v21 (user
+  // 2026-10-13): manual positions render verbatim and NEVER make siblings move
+  // — auto/lattice nodes keep their home cell even when a manual rect overlaps
+  // it. The old rescue/yield chains re-flowed the card under the cursor and
+  // are removed by demand; "自动排列" on the card is the way back to a tidy grid.
   function buildView(mdl, ov) {
     var G = (mdl && mdl.geo) || GEO_MAIN, CW = cellW(G), CH = cellH(G);
     var placed = new Map(), occ = new Set(), ids = [], maxX = 0, maxY = 0;
@@ -787,27 +789,9 @@
       if (placed.has(ids[i])) continue;
       p = mdl.placed.get(ids[i]) || mdl.ulPos.get(ids[i]);
       if (!p) continue;
-      if (G.KTF) {
-        // v15 fix: in-card rescue must stay INSIDE the card. The old unbounded
-        // `p.y += CH` chain could push a block past the bottom edge (the card
-        // frame clips nothing — the block visibly leaked out of the panel).
-        // Nearest in-card lattice cell that is free; if none exists, keep the
-        // home cell (overlapping the manual block is allowed, leaving the card is not).
-        while (occ.has(p.x + "," + p.y)) {
-          var cx2, cy2, best = null, bd = 1e18;
-          for (cx2 = G.M; cx2 + G.W <= mdl.width - G.M + 0.5; cx2 += CW) {
-            for (cy2 = G.M; cy2 + G.H <= mdl.height - G.M + 0.5; cy2 += CH) {
-              if (occ.has(cx2 + "," + cy2)) continue;
-              var dd = (cx2 - p.x) * (cx2 - p.x) + (cy2 - p.y) * (cy2 - p.y);
-              if (dd < bd) { bd = dd; best = { x: cx2, y: cy2 }; }
-            }
-          }
-          if (!best) break;
-          p = best;
-        }
-      } else {
-        while (occ.has(p.x + "," + p.y)) p = { x: p.x, y: p.y + CH };
-      }
+      // v21: NO rescue/yield around manual rects — auto nodes keep their home
+      // cell. Manual-priority used to shove every overlapping sibling to the
+      // "nearest free cell"; the user found that uncontrollable (2026-10-13).
       occ.add(p.x + "," + p.y);
       placed.set(ids[i], p);
     }
@@ -1694,7 +1678,13 @@
     var H = (pos.h && pos.h >= 36) ? pos.h : G.H;
     var units = Math.max(10, Math.round(G.UNITS * W / G.W));
     var lines = wrapTitle(n.title, units);
-    var maxLines = Math.max(1, Math.floor((H - G.TY + G.DY - 4) / G.DY));
+    // v21 fix (live v8 red): the meta/pill band sits at MY — the old maxLines
+    // formula only guarded the block BOTTOM, so a second title line slid under
+    // the provider chip (measured ~7px overlap on v16-tall blocks). Reserve the
+    // band: last allowed baseline = MY - cf - 2.
+    var cf = G.UNITS >= 28 ? 9.5 : 8;
+    var MY = Math.min(G.MY + (H - G.H), H - 7);
+    var maxLines = Math.max(1, Math.floor((MY - cf - 2 - G.TY) / G.DY) + 1);
     if (lines.length > maxLines) {
       lines = lines.slice(0, maxLines);
       lines[maxLines - 1] = lines[maxLines - 1].replace(/\u2026*$/, "") + "\u2026";
@@ -1709,10 +1699,9 @@
       props.onClick = opts.handlers.onClick;
     }
     var barY = Math.round(H * 0.18);
-    var MY = Math.min(G.MY + (H - G.H), H - 7);
     var meta = String(opts.metaOf ? (opts.metaOf(n) || "") : (n.assignee || "—"));
     var stTxt = (ICON[n.status] || "●") + " " + (LABEL[n.status] || n.status);
-    var cf = G.UNITS >= 28 ? 9.5 : 8, mf = G.UNITS >= 28 ? 11 : 9, sf = G.UNITS >= 28 ? 10.5 : 8.8;
+    var mf = G.UNITS >= 28 ? 11 : 9, sf = G.UNITS >= 28 ? 10.5 : 8.8;
     // ★ keep cf in step with .kg-node .kg-mtag / .kg-mini .kg-mtag in style.css
     // the API provider/model chip (nodes carry tag/tagFull/tagColor from the graph api)
     var tag = n.tag ? String(n.tag) : "";
@@ -1894,16 +1883,16 @@
       return function () { document.removeEventListener("fullscreenchange", onFs); };
     }, [fitView]);
 
-    // per-board manual positions ride on the board switch (legacy free positions
-    // from v1 get normalised onto the lattice once, then persisted)
+    // per-board manual positions ride on the board switch.
+    // v21: read verbatim — the old snapCell "normalisation" re-snapped EVERY
+    // stored position on every board switch/reload, so precisely parked
+    // blocks jumped to the lattice behind the user's back. No rewrite here.
     useEffect(function () {
-      var raw = readPos(board), fixed = {}, changed = false;
+      var raw = readPos(board), fixed = {};
       Object.keys(raw).forEach(function (k) {
-        var sq = snapCell(raw[k]);
-        if (sq.x !== raw[k].x || sq.y !== raw[k].y) changed = true;
-        fixed[k] = sq;
+        var q = raw[k];
+        fixed[k] = { x: Math.max(0, q.x), y: Math.max(0, q.y) };
       });
-      if (changed) writePos(board, fixed);
       setPosOv(fixed);
       if (lastFit.current !== board) { lastFit.current = board; pendingFit.current = true; }
     }, [board]);
@@ -1993,16 +1982,12 @@
         setNDragging(false);
         if (d && d.moved) {
           ndSuppressClick.current = true;
-          // settle on release: nearest cell, yielding downward if taken
+          // v21 (user 2026-10-13): release keeps the tracked position — the
+          // magnet in move() already snapped it when close to the lattice.
+          // The old forced nearest-cell settle + downward yield moved the block
+          // away from where the pointer left it and re-flowed siblings.
           var cur = (posOvRef.current || {})[d.id] || { x: d.ox, y: d.oy };
-          var fp = snapCell(cur);
-          var occ = new Set();
-          viewRef.current.placed.forEach(function (q, qid) {
-            if (qid === d.id) return;
-            var kc = snapCell(q);
-            occ.add(kc.x + "," + kc.y);
-          });
-          while (occ.has(fp.x + "," + fp.y)) fp = { x: fp.x, y: fp.y + CELL_H };
+          var fp = { x: Math.max(0, cur.x), y: Math.max(0, cur.y) };
           var nxt = Object.assign({}, posOvRef.current);
           nxt[d.id] = fp;
           posOvRef.current = nxt;
@@ -2342,7 +2327,12 @@
         if (d.last && d.last.x === fx && d.last.y === fy) return;
         d.last = { x: fx, y: fy };
         var nxt = Object.assign({}, ovRef.current);
-        nxt[d.id] = { x: fx, y: fy };
+        // v21: a move gesture must NOT discard a manual resize — carry w/h.
+        var q1 = nxt[d.id];
+        var np = { x: fx, y: fy };
+        if (q1 && q1.w) np.w = q1.w;
+        if (q1 && q1.h) np.h = q1.h;
+        nxt[d.id] = np;
         ovRef.current = nxt;
         setOv(nxt);
       }
@@ -2362,47 +2352,16 @@
           writeMiniPos(props.pid, o1);
           return;
         }
-        var box = blockBox(), CW = cellW(G), CH = cellH(G);
-        var occ = new Set();
-        viewRef.current.placed.forEach(function (q, qid) {
-          if (qid === d.id) return;
-          var kc = snapCell(q, G);
-          occ.add(kc.x + "," + kc.y);
-          // v17: a resized neighbour owns every cell its box overlaps
-          var qw = q.w || G.W, qh = q.h || G.H;
-          if (qw > G.W || qh > G.H) {
-            for (var cx2 = G.M; cx2 <= q.x + qw; cx2 += CW)
-              for (var cy2 = G.M; cy2 <= q.y + qh; cy2 += CH)
-                if (cx2 < q.x + qw && cy2 < q.y + qh && cx2 + G.W > q.x && cy2 + G.H > q.y) occ.add(cx2 + "," + cy2);
-          }
-        });
+        var box = blockBox();
         var cur = (ovRef.current || {})[d.id] || { x: d.ox, y: d.oy };
-        cur = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1), w: cur.w, h: cur.h };
-        // v10: a free drop that touches nothing STAYS where the pointer left it —
-        // blocks may be parked at any position inside the card. Only on a real
-        // collision does the settle hop to the nearest free lattice cell.
-        var clash = false;
-        viewRef.current.placed.forEach(function (q, qid) {
-          if (qid === d.id) return;
-          var pw = cur.w || G.W, ph = cur.h || G.H, qw2 = q.w || G.W, qh2 = q.h || G.H;
-          if (cur.x < q.x + qw2 && q.x < cur.x + pw && cur.y < q.y + qh2 && q.y < cur.y + ph) clash = true;
-        });
-        var fp = null, r, mx, my;
-        if (!clash) fp = cur;
-        var seed = snapCell(cur, G);
-        for (r = 0; !fp && r <= 30; r++) {
-          for (my = -r; my <= r && !fp; my++) {
-            for (mx = -r; mx <= r && !fp; mx++) {
-              if (Math.max(Math.abs(mx), Math.abs(my)) !== r) continue;
-              var cand = snapCell({ x: clamp(seed.x + mx * CW, box.x0, box.x1), y: clamp(seed.y + my * CH, box.y0, box.y1) }, G);
-              if (cand.x < box.x0 - 0.5 || cand.x > box.x1 + 0.5 || cand.y < box.y0 - 0.5 || cand.y > box.y1 + 0.5) continue;
-              if (!occ.has(cand.x + "," + cand.y)) fp = cand;
-            }
-          }
-        }
-        if (!fp) fp = { x: clamp(seed.x, box.x0, box.x1), y: clamp(seed.y, box.y0, box.y1) };
-        // v17: a resized block that had to hop keeps its MANUAL SIZE
-        if (cur.w && cur.h && (!fp.w || fp.x !== cur.x || fp.y !== cur.y)) fp = { x: fp.x, y: fp.y, w: cur.w, h: cur.h };
+        // v21 (user 2026-10-13): the drop STAYS where the pointer left it —
+        // clamped to the card border, nothing else. The old collision hop
+        // spiralled the block to the "nearest free cell", so the user could
+        // never park a block exactly where they wanted. Overlaps are allowed
+        // by design now; "自动排列" re-tidies the card on command.
+        var fp = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1) };
+        if (cur.w) fp.w = cur.w;
+        if (cur.h) fp.h = cur.h;
         var nxt = Object.assign({}, ovRef.current);
         nxt[d.id] = fp;
         ovRef.current = nxt;
@@ -3493,7 +3452,11 @@
     }
 
     function toggleProf(name) {
-      var nxt = Object.assign({}, hidden);
+      // v21 fix: read the store FRESH (same pattern the filter-row/StatusBar
+      // toggles use). The old closure copy made every click in a synchronous
+      // batch compute from the same stale map — only the LAST toggle survived
+      // (v9 solo-card precondition died with 19 chips clicked / 1 hidden).
+      var nxt = readHiddenProf();
       if (nxt[name]) delete nxt[name]; else nxt[name] = 1;
       writeHiddenProf(nxt);
       setHidden(nxt);
