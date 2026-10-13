@@ -1,0 +1,1 @@
+{"name":"kanban-graph-dashboard","private":true,"scripts":{"build":"cp src/app.js dist/index.js"}}
