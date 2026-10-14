@@ -49,6 +49,11 @@ One command: the repo is laid out exactly the way the plugin loader wants it
 so the clone lands as `~/.hermes/plugins/kanban-graph/dashboard/`.
 `hermes plugins update kanban-graph` pulls later commits, `hermes plugins remove kanban-graph` uninstalls.
 
+**Full cross-machine playbook** (agent-facing skill, version-gated — enable
+filter on newer builds, profile-shim workaround, isolated `HERMES_HOME`
+launch, headless checks, why a fresh board is empty):
+`skills/board-plus-install/SKILL.md`.
+
 **Option 2 — `install.sh` (named profile / offline checkout):**
 
 ```bash
