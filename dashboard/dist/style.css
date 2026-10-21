@@ -90,6 +90,19 @@
 .kg-node .kg-st { font-size: 10.5px; font-weight: 600; fill: var(--kg-color, #6b7280); }
 .kg-ulhdr { font-size: 11px; fill: var(--color-muted-foreground, #9ca3af); }
 .kg-node.kg-sel .kg-box { stroke-width: 2.6; }
+/* v23: rubber-band selection inside a card */
+.kg-node.kg-sel .kg-box {
+  stroke-opacity: 1;
+  fill-opacity: .2;
+  filter: drop-shadow(0 0 4px rgba(59, 130, 246, .95));
+}
+.kg-marquee {
+  fill: rgba(59, 130, 246, .12);
+  stroke: #3b82f6;
+  stroke-width: 1.4;
+  stroke-dasharray: 5 3;
+  pointer-events: none;
+}
 .kg-node.kg-s-done { opacity: .6; }
 .kg-node.kg-dim { opacity: .18; }
 
@@ -116,6 +129,7 @@
   stroke-opacity: .45;
   stroke-width: 1.4;
   transition: opacity 150ms ease;
+  pointer-events: none; /* v23: a wire must not swallow the rubber band's pointerdown */
 }
 .kg-edge.kg-back {
   stroke: #ef4444;

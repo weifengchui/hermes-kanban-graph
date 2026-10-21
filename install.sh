@@ -26,14 +26,25 @@ for f in manifest.json plugin_api.py dist/index.js dist/style.css; do
   fi
 done
 
+# plugin.yaml sits at the repo root, not in dashboard/. The CLI plugin loader
+# reads it to resolve the plugin NAME; the dashboard loader only needs
+# dashboard/manifest.json. Without it a named-profile install is invisible to
+# `hermes plugins enable|list` (it answers "No plugin named 'kanban-graph'"),
+# and newer builds refuse to list the tab until the plugin is in plugins.enabled.
+PLUGIN_YAML="$REPO/plugin.yaml"
+
 if [ -n "$PROFILE" ]; then
-  DEST="$HOME_DIR/profiles/$PROFILE/plugins/kanban-graph/dashboard"
+  PROFILE_DIR="$HOME_DIR/profiles/$PROFILE"
+  DEST="$PROFILE_DIR/plugins/kanban-graph/dashboard"
 else
+  PROFILE_DIR="$HOME_DIR"
   DEST="$HOME_DIR/plugins/kanban-graph/dashboard"
 fi
 
-if [ ! -d "$(dirname "$(dirname "$DEST")")" ]; then
-  echo "install: $(dirname "$(dirname "$DEST")") does not exist — wrong profile?" >&2
+# the PROFILE dir must exist (a typo'd profile name is a user error worth
+# reporting) — but its plugins/ dir may not: create it.
+if [ ! -d "$PROFILE_DIR" ]; then
+  echo "install: $PROFILE_DIR does not exist — wrong profile?" >&2
   echo "         pass a profile name that exists, or set HERMES_HOME." >&2
   exit 1
 fi
@@ -43,8 +54,19 @@ cp "$SRC/manifest.json" "$DEST/manifest.json"
 cp "$SRC/plugin_api.py" "$DEST/plugin_api.py"
 cp "$SRC/dist/index.js" "$DEST/dist/index.js"
 cp "$SRC/dist/style.css" "$DEST/dist/style.css"
+# the CLI-side manifest (name/version/description) — see the note above
+if [ -f "$PLUGIN_YAML" ]; then
+  cp "$PLUGIN_YAML" "$(dirname "$DEST")/plugin.yaml"
+fi
 
 echo "installed -> $DEST"
+echo
+echo "enable it (newer builds list the tab only for plugins in plugins.enabled):"
+if [ -n "$PROFILE" ]; then
+  echo "  hermes -p $PROFILE plugins enable kanban-graph"
+else
+  echo "  hermes plugins enable kanban-graph"
+fi
 echo
 echo "restart the dashboard so plugin_api.py is loaded:"
 echo "  hermes dashboard --stop && hermes dashboard --no-open --port 9119"

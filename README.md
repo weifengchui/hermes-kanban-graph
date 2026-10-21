@@ -22,6 +22,9 @@ draggable wall.
 | **Groups** 分组 | Drop a card onto another to form a group; members are tiled inside. Double-click the group title to rename in place. v12: groups NEST — drop a group's title bar onto another group (up to 4 levels, cycle-guarded; the store is always a legal forest); drag a nested group out of the body to extract it back to the wall; ✕ dissolves only the clicked level (children survive as top-level); empty group titles flow as compact strips inside the body, one per member group, draggable again. |
 | **Content-aware layout** 按内容排布 | Members that hold task blocks get a bigger share of the group body, empty ones shrink. |
 | **自动排列 per card** | A button on every card: put its task blocks back on the lattice, resize the card to its content, and (for a group) re-run the weighted layout. |
+| **Dependency-aware packing** 依赖优先排布 | Inside a card, 自动排列 groups the tasks by their dependency chain: every CONNECTED chain gets its own contiguous run (a parent sits right above its child), so a wire never has to cross the blocks of an unrelated chain. |
+| **Rubber-band select** 框选 | Drag on the empty canvas of a card to sweep a band over the task blocks: every block it touches is selected. Click a block to select it, shift-click to add. |
+| **Group drag** 整体拖动 | Drag any selected block and the whole selection moves with it, rigidly (one write, one undo point). Click the empty canvas to drop the selection. |
 | **Task detail popup** 任务详情 | Double-click any task block for status, assignee, model, timings, description, dependencies, recent runs, comments and events. |
 | **Drag reference grid** 参考格子 | While you drag, an 8 px / 40 px grid appears so drops land tidy; toggle it off with 网格. |
 | **Status filter** | Per-status chips hide whole statuses (persisted). |
@@ -49,6 +52,13 @@ One command: the repo is laid out exactly the way the plugin loader wants it
 so the clone lands as `~/.hermes/plugins/kanban-graph/dashboard/`.
 `hermes plugins update kanban-graph` pulls later commits, `hermes plugins remove kanban-graph` uninstalls.
 
+> **Enable it.** Newer Hermes builds list a dashboard tab only for plugins that
+> are in `plugins.enabled` — an installed-but-not-enabled plugin is silently
+> withheld from the tab bar (and its `api` is never imported). If Board+ is
+> missing after an upgrade, run `hermes plugins enable kanban-graph` and
+> restart the dashboard. Older builds that only honour
+> `dashboard.hidden_plugins` are unaffected; enabling is safe on both.
+
 **Full cross-machine playbook** (agent-facing skill, version-gated — enable
 filter on newer builds, profile-shim workaround, isolated `HERMES_HOME`
 launch, headless checks, why a fresh board is empty):
@@ -64,11 +74,16 @@ HERMES_HOME=/x ./install.sh   # custom Hermes home
 ```
 
 `install.sh` copies the four payload files from `dashboard/` into the target
-profile. Both options write the same layout.
+profile, plus the root `plugin.yaml` (the CLI resolves the plugin *name* from
+it — without it `hermes plugins enable kanban-graph` answers "No plugin named
+'kanban-graph'"). Both options write the same layout.
 
-Then restart the dashboard so the Python API + the manifest label are loaded:
+Then enable it and restart the dashboard, so the Python API + the manifest
+label are loaded:
 
 ```bash
+hermes -p <profile> plugins enable kanban-graph   # named profile
+hermes plugins enable kanban-graph                 # default profile
 hermes dashboard --stop
 hermes dashboard --no-open --port 9119
 ```
@@ -115,7 +130,11 @@ clones successfully and then shows up nowhere.
 | double-click a task block | task detail popup (`Esc` or the backdrop closes it) |
 | double-click a group title | rename in place (`Enter` saves, `Esc` cancels) |
 | drag a task block inside a card | rearrange that profile's blocks |
-| click 自动排列 on a card | tidy that card (resize to its content / re-run the group layout) |
+| drag on the empty canvas of a card | rubber-band select every task block the band touches |
+| click a task block | select it (shift-click adds / removes) |
+| drag a selected task block | move the WHOLE selection, rigidly |
+| click the empty canvas of a card | drop the selection |
+| click 自动排列 on a card | tidy that card (resize to its content / re-run the group layout / pack the dependency chains) |
 | click 自动排列 in the toolbar | re-tile the whole wall, in card order (有任务块的在前，其后按名) |
 | click 网格 | show/hide the drag reference grid |
 

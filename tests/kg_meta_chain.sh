@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kg_meta_chain.sh — Board+ 全链 headless 元校验（14 件，2026-10-12 v18 收尾重建）
+# kg_meta_chain.sh — Board+ 全链 headless 元校验（15 件，2026-10-21 v23 收尾重建）
 # 输出与 /tmp/kg_meta_final*.log 同型：每支一行 "== 名称 <结果>"，FAIL 明细内联。
 # 纪律：跑链期间禁改产品/探针；本轮日志头部带活体 dist 的 md5 字节证物。
 set -u
@@ -27,7 +27,7 @@ run1() {
   # probe died without printing any verdict = early-death, flag loudly
   grep -qE "ALL PASS|^FAIL" "$out" || echo "   !! $name produced no verdict (early death?)" >> "$LOG"
 }
-for p in kg_multi_hl.py kg_v7_hl.py kg_v8_hl.py kg_v9_hl.py kg_v10_hl.py kg_v12_hl.py kg_v13_hl.py kg_v14_hl.py kg_v15_hl.py kg_v16_hl.py kg_v17_hl.py kg_v18_hl.py _kg_compat_probe.py kg_v20_hl.py; do
+for p in kg_multi_hl.py kg_v7_hl.py kg_v8_hl.py kg_v9_hl.py kg_v10_hl.py kg_v12_hl.py kg_v13_hl.py kg_v14_hl.py kg_v15_hl.py kg_v16_hl.py kg_v17_hl.py kg_v18_hl.py _kg_compat_probe.py kg_v20_hl.py kg_v23_hl.py; do
   run1 "$p"
 done
 # [14] text/measure probe — known exit glitch: one retry, judge by conclusions

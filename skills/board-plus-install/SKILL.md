@@ -1,7 +1,7 @@
 ---
 name: board-plus-install
 description: "Install the Board+ dashboard plugin: version gate, install/enable, safe launch, headless checks, why a fresh board is empty. 跨机器通用安装技能（外部用户版）。"
-version: 2.0.0
+version: 2.1.0
 author: weifengchui
 license: MIT
 platforms: [windows, linux]
@@ -44,6 +44,8 @@ hermes plugins enable kanban-graph
 ```
 - profile 名 = `~/.hermes/profiles/` 下的目录名，全小写。
 - **enable 一律照做**：新构建的 `/api/dashboard/plugins` 按插件 enabled 集合过滤（不 enable 不出 tab）；旧构建只按 `dashboard.hidden_plugins` 过滤，enable 也无副作用。enable 只写本 profile 的 config，不影响其他 profile。
+- **enable 报 "No plugin named 'kanban-graph'"**：说明该 profile 的插件目录里缺根级 `plugin.yaml`（CLI 靠它解析插件名；dashboard 只认 `dashboard/manifest.json`，所以 tab 能出、enable 却找不到）。修法：把仓库根的 `plugin.yaml` 复制到 `<profile>/plugins/kanban-graph/plugin.yaml`（新版 `install.sh` 已自带这一步），再执行 enable。
+- **hermes 会按"粘性 active_profile"改写作用域**：`HERMES_HOME` 指向 hermes 根目录（非 `.../profiles/<名>`）时，CLI 会改用 `~/.hermes/active_profile` 指向的 profile。想操作默认 profile 必须显式 `hermes -p default …`；`HERMES_HOME=<root>/profiles/<名>` 才会被原样采用。
 - clone 报 Connection reset（网络抖动）⇒ 重试 2-3 次；仍失败走离线路：GitHub 下载仓库 zip 解压，在仓库根执行 `./install.sh <profile名>`（等价落位到 `$HERMES_HOME/plugins/kanban-graph/dashboard/`；不带参数=默认 profile）。
 - 完整性自检：安装件必须与你拿到的仓库 `dashboard/` 逐字节一致：
 ```
@@ -69,7 +71,9 @@ env HOME=$HOME HERMES_HOME=$HOME/.hermes/profiles/<profile> \
 curl -s http://127.0.0.1:9129/api/dashboard/plugins        # 必须含 "kanban-graph"
 curl -s -o /dev/null -w %{http_code} http://127.0.0.1:9129/dashboard-plugins/kanban-graph/dist/index.js   # 200
 curl -s -o /dev/null -w %{http_code} http://127.0.0.1:9129/dashboard-plugins/kanban-graph/dist/style.css  # 200
+curl -s http://127.0.0.1:9129/openapi.json | grep -c '/api/plugins/kanban-graph/'   # 必须 ≥1（后端已挂载）
 ```
+最后一条最容易被漏：**tab 出现 ≠ 后端已挂载**。插件的 `api` 在进程启动时导入，启动那一刻若插件不在 `plugins.enabled`，路由根本不会注册——表现是页面能开但永远空/报错。enable 之后**必须重启 dashboard 进程**（本条 4 项全绿才算装好）。
 浏览器开 `http://127.0.0.1:9129/kanban-graph`，左侧导航 BOARD+（导航对插件名统一大写渲染，属正常）。
 tab 不出现：①确认第1步 enable 做了；②本进程必须是 enable 之后**新起**的（插件清单是进程级缓存，改完要重启 dashboard）。`/api/dashboard/plugins/rescan` 要会话 token，裸 curl 回 Unauthorized 是正常，别误判服务挂了。
 
@@ -86,6 +90,7 @@ hermes -p <profile> kanban create "标题" --assignee <profile> [--parent t_xxxx
 ## 运维
 - 手工起的进程重启不自启：要常驻就自建 systemd/cron 拉起 + 第3步机检。
 - 升级：`hermes plugins update kanban-graph`，然后重启 dashboard 进程；升级后重跑一遍第1步的 diff 自检。
+- **Hermes 升级后 tab 消失**：新构建的插件清单按 `plugins.enabled` 过滤，插件没进这个名单就静默不出 tab（同时它的 `api` 也不会被导入）。修：`hermes -p <profile> plugins enable kanban-graph` → 重启 dashboard 进程 → 跑第3步四项机检。
 - 卸载：`hermes -p <profile> plugins remove kanban-graph`，只删该 profile 目录内文件。
 - 问题反馈：GitHub issue → `weifengchui/hermes-kanban-graph`。
 
@@ -93,6 +98,9 @@ hermes -p <profile> kanban create "标题" --assignee <profile> [--parent t_xxxx
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 装了没 tab | 未 enable（新构建）/ 进程未重启 / wrapper 丢了 HERMES_HOME | 第1步 enable、重启进程、第2步绕法 |
+| 升级后 tab 没了 | 新构建按 `plugins.enabled` 过滤；enable 条目不在名单里 | `hermes -p <profile> plugins enable kanban-graph` + 重启 dashboard |
+| tab 在但页面空白/接口 404 | 插件 `api` 在启动那一刻未 enable，没被导入 | enable 后重启 dashboard；机检加 `openapi.json` 看 `/api/plugins/kanban-graph/` 路由 |
+| enable 报 "No plugin named" | profile 插件目录缺根级 `plugin.yaml` | 复制仓库根 `plugin.yaml` 到 `<profile>/plugins/kanban-graph/`（新版 install.sh 自带） |
 | index.js 404 | 服务启动时的 home ≠ 本 profile | 第2步绕法；查 `[HERMES_HOME fallback]` 日志 |
 | clone 失败 | 网络抖动 | 重试；或 zip + `install.sh` 离线装 |
 | 看板空白 | 板上本来没任务 | `kanban create` 建卡，见数据来源节 |
@@ -101,5 +109,6 @@ hermes -p <profile> kanban create "标题" --assignee <profile> [--parent t_xxxx
 ## 兼容性备注
 - 需要带 dashboard 插件发现功能的 Hermes 构建（第0步可判）。
 - enable 过滤随构建版本不同：新构建按 enabled 集合过滤插件列表，旧构建只按 `dashboard.hidden_plugins`——统一 enable 对两种版本都安全。
+- **enable 条目写在"服务该插件的那个 profile"的 config.yaml 里**：根目录安装的插件，每个 profile 的 dashboard 都能扫到，但每个 profile 都要各自 enable（`plugins.enabled` 是 per-profile 配置）。
 - `--isolated` 仅个别新构建支持，旧构建为 unknown 参数。
 - 2026-10 起在 Windows+WSL 与 Linux 环境实装验收通过。

@@ -520,6 +520,8 @@
       // keeps siblings adjacent), so a chain draws bottom→top in one line and
       // the queue only wraps when the column is full. Status/title stay as
       // tie-breakers for unrelated blocks.
+      // v23 (user 2026-10-21): the layers are now per CONNECTED COMPONENT, so
+      // independent chains stop interleaving (see the note below).
       var drawn = linked.concat(unlinked);
       var lmap = new Map();
       for (k = 0; k < linked.length; k++) lmap.set(linked[k].id, 0);
@@ -534,9 +536,6 @@
         }
         if (!ch2) break;
       }
-      var parOf = new Map();
-      for (k = 0; k < linked.length; k++) parOf.set(linked[k].id, []);
-      for (i = 0; i < es.length; i++) if (parOf.has(es[i].child)) parOf.get(es[i].child).push(es[i].parent);
       function stCmp(a, b) {
         var sa = STATUS_ORDER.indexOf(a.status), sb = STATUS_ORDER.indexOf(b.status);
         if (sa < 0) sa = STATUS_ORDER.length;
@@ -544,29 +543,85 @@
         if (sa !== sb) return sa - sb;
         return String(a.title || "").localeCompare(String(b.title || ""), "en", { numeric: true, sensitivity: "base" });
       }
-      var maxL = 0; lmap.forEach(function (v) { if (v > maxL) maxL = v; });
-      var ordered2 = [], posIdx = new Map();
-      for (k = 0; k <= maxL; k++) {
-        (function (lvl) {
-          var bucket = [];
-          for (var q2 = 0; q2 < linked.length; q2++) if (lmap.get(linked[q2].id) === lvl) bucket.push(linked[q2]);
-          bucket.sort(function (a, b) {
-            var ba = baryOf(a), bb = baryOf(b);
-            if (Math.abs(ba - bb) > 1e-9) return ba - bb;
-            return stCmp(a, b);
-          });
-          for (var j2 = 0; j2 < bucket.length; j2++) posIdx.set(bucket[j2].id, ordered2.length + j2);
-          ordered2 = ordered2.concat(bucket);
-        })(k);
+      // ── v23 (user 2026-10-21): dependency-AWARE packing ───────────────
+      // The old order was ONE global layer sweep: layer 0 held the root of
+      // EVERY chain, layer 1 the child of every chain. Two INDEPENDENT chains
+      // therefore interleaved, and the wire from a parent to its child had to
+      // cross the other chain's blocks on the way ("连续越过多个不相关的任务
+      // 块"). Now every CONNECTED COMPONENT of the dependency graph is packed
+      // as one CONTIGUOUS run — layered + barycentre inside the component —
+      // so a wire only ever crosses blocks of its own chain, and a parent
+      // sits right above its child.
+      var kidsOf = new Map(), parsOf = new Map();
+      for (k = 0; k < linked.length; k++) { kidsOf.set(linked[k].id, []); parsOf.set(linked[k].id, []); }
+      for (i = 0; i < es.length; i++) {
+        if (!kidsOf.has(es[i].parent) || !kidsOf.has(es[i].child)) continue;
+        kidsOf.get(es[i].parent).push(es[i].child);
+        parsOf.get(es[i].child).push(es[i].parent);
       }
-      function baryOf(nd) {
-        var ps = parOf.get(nd.id) || [], sum = 0, n = 0;
-        for (var q3 = 0; q3 < ps.length; q3++) {
-          var pv = posIdx.get(ps[q3]);
+      // connected components (undirected over the forward edges)
+      var comps = [], compIdx = new Map();
+      for (k = 0; k < linked.length; k++) {
+        var cid = linked[k].id;
+        if (compIdx.has(cid)) continue;
+        var ci2 = comps.length, comp = [], stack = [cid], seen = new Set([cid]);
+        compIdx.set(cid, ci2);
+        while (stack.length) {
+          var u = stack.pop(); comp.push(u);
+          var nb = kidsOf.get(u).concat(parsOf.get(u));
+          for (i = 0; i < nb.length; i++) {
+            if (!seen.has(nb[i])) { seen.add(nb[i]); compIdx.set(nb[i], ci2); stack.push(nb[i]); }
+          }
+        }
+        comps.push(comp);
+      }
+      // inside a component: by layer, then barycentre of the parents already
+      // placed (siblings stay next to each other)
+      function baryIn(id, pos) {
+        var ps = parsOf.get(id) || [], sum = 0, n = 0;
+        for (var z = 0; z < ps.length; z++) {
+          var pv = pos.get(ps[z]);
           if (pv !== undefined) { sum += pv; n++; }
         }
         return n ? sum / n : 1e9;
       }
+      function orderComp(ids) {
+        var pos = new Map(), out = [], ml = 0;
+        for (var z = 0; z < ids.length; z++) { var l = lmap.get(ids[z]) || 0; if (l > ml) ml = l; }
+        for (var L = 0; L <= ml; L++) {
+          var bucket = [];
+          for (var z2 = 0; z2 < ids.length; z2++) if ((lmap.get(ids[z2]) || 0) === L) bucket.push(ids[z2]);
+          bucket.sort(function (a, b) {
+            var ba = baryIn(a, pos), bb = baryIn(b, pos);
+            if (Math.abs(ba - bb) > 1e-9) return ba - bb;
+            return stCmp(nodeMap.get(a), nodeMap.get(b));
+          });
+          for (var z3 = 0; z3 < bucket.length; z3++) pos.set(bucket[z3], out.length + z3);
+          // the caller wants NODES (drawn[] is a list of nodes, not of ids)
+          for (var z4 = 0; z4 < bucket.length; z4++) out.push(nodeMap.get(bucket[z4]));
+        }
+        return out;
+      }
+      // components in chain order: the shallowest root first, then its
+      // status/title (stable — 自动排列 never reshuffles on a reload)
+      var compMeta = comps.map(function (c, ci) {
+        var mn = Infinity;
+        for (var z = 0; z < c.length; z++) { var l = lmap.get(c[z]) || 0; if (l < mn) mn = l; }
+        var head = null;
+        for (var z2 = 0; z2 < c.length; z2++) {
+          if ((lmap.get(c[z2]) || 0) !== mn) continue;
+          if (!head || stCmp(nodeMap.get(c[z2]), nodeMap.get(head)) < 0) head = c[z2];
+        }
+        return { ci: ci, ids: c, minL: mn, head: head };
+      });
+      compMeta.sort(function (a, b) {
+        if (a.minL !== b.minL) return a.minL - b.minL;
+        var d = stCmp(nodeMap.get(a.head), nodeMap.get(b.head));
+        if (d !== 0) return d;
+        return a.ci - b.ci;
+      });
+      var ordered2 = [];
+      for (var cm = 0; cm < compMeta.length; cm++) ordered2 = ordered2.concat(orderComp(compMeta[cm].ids));
       unlinked.sort(stCmp);
       drawn = ordered2.concat(unlinked);
       var dmap = new Map(), pl2 = new Map(),
@@ -2317,6 +2372,13 @@
     var ref = useRef(null);
     var ovRef = useRef(ov); ovRef.current = ov;
     var ndRef = useRef(null);
+    // v23 (user 2026-10-21): rubber-band selection of several task blocks
+    // inside one card, then a group drag that moves them together.
+    s = useState([]); var sel = s[0], setSel = s[1];
+    s = useState(null); var marq = s[0], setMarq = s[1];
+    var selRef = useRef(sel); selRef.current = sel;
+    var svgRef = useRef(null);
+    var offRef = useRef({ offX: 0, offY: 0 });
     var dragPinRef = useRef(null);
     // v17 FIX (top-left-drop probe, 10-12): dragging ONE block changes the
     // recomputed truth on the next live reload (300ms), which used to flip the
@@ -2380,6 +2442,7 @@
     // normal list, and the freed space below becomes parkable room for
     // manually dragged blocks (blockBoxOf grows with offY=0).
     var offX = (cw - vw) / 2, offY = 0;
+    offRef.current = { offX: offX, offY: offY };
     var view = useMemo(function () {
       var box = blockBoxOf(cw, ch, offX, offY, G), o2 = null, kk, q;
       if (ov) {
@@ -2404,6 +2467,12 @@
     function blockBox() { return boxRef.current; }
 
     // ── block dragging inside the card (persisted per profile) ──
+    // v23 (user 2026-10-21): three gestures share this listener —
+    //   "marq"  rubber band over the card background → selects the blocks it
+    //           touches (shift keeps the earlier picks)
+    //   "res"   the corner grip → grows/shrinks one block
+    //   "move"  a block drag → moves the block, or the WHOLE selection when
+    //           the grabbed block is one of the selected ones
     useEffect(function () {
       if (!ndrag) return;
       function move(e) {
@@ -2413,6 +2482,15 @@
         if (!d.moved && Math.abs(ddx) + Math.abs(ddy) > 4) d.moved = true;
         if (!d.moved) return;
         var z = scaleRef.current || 1;
+        // v23: the rubber band lives in MODEL units (the card's own lattice),
+        // so it lines up with the blocks whatever the fit scale is.
+        if (d.mode === "marq") {
+          var p1 = toModel(e);
+          if (!p1) return;
+          d.x1 = p1.x; d.y1 = p1.y;
+          setMarq(marqRect(d));
+          return;
+        }
         // v17: corner-grip resize — the block grows/shrinks in place; its x/y
         // stay where they are and the view-merge clamp keeps it inside the card.
         if (d.mode === "res") {
@@ -2427,28 +2505,69 @@
           setOv(nres);
           return;
         }
+        // ── move (one block, or the whole selection) ──
         var fx = d.ox + ddx / z, fy = d.oy + ddy / z;
         var gx = snapCell({ x: fx, y: fy }, G);
         if (Math.abs(fx - gx.x) <= MAGNET) fx = gx.x;
         if (Math.abs(fy - gx.y) <= MAGNET) fy = gx.y;
         var box = blockBox();
-        fx = clamp(fx, box.x0, box.x1); fy = clamp(fy, box.y0, box.y1);
+        // v23: the GROUP is clamped as one rigid body — the selection keeps
+        // its shape instead of squashing against the card border.
+        var mdx = fx - d.ox, mdy = fy - d.oy;
+        var lim = groupLimits(d, box);
+        mdx = clamp(mdx, lim.x0, lim.x1);
+        mdy = clamp(mdy, lim.y0, lim.y1);
+        fx = d.ox + mdx; fy = d.oy + mdy;
         if (d.last && d.last.x === fx && d.last.y === fy) return;
         d.last = { x: fx, y: fy };
         var nxt = Object.assign({}, ovRef.current);
-        // v21: a move gesture must NOT discard a manual resize — carry w/h.
-        var q1 = nxt[d.id];
-        var np = { x: fx, y: fy };
-        if (q1 && q1.w) np.w = q1.w;
-        if (q1 && q1.h) np.h = q1.h;
-        nxt[d.id] = np;
+        var changed = false;
+        for (var i = 0; i < d.ids.length; i++) {
+          var id = d.ids[i], b = d.base[id];
+          if (!b) continue;
+          var nx = id === d.id ? fx : b.x + mdx;
+          var ny = id === d.id ? fy : b.y + mdy;
+          // v21: a move gesture must NOT discard a manual resize — carry w/h.
+          var q1 = nxt[id];
+          var np = { x: nx, y: ny };
+          if (q1 && q1.w) np.w = q1.w;
+          if (q1 && q1.h) np.h = q1.h;
+          nxt[id] = np;
+          changed = true;
+        }
+        if (!changed) return;
         ovRef.current = nxt;
         setOv(nxt);
       }
       function up() {
         var d = ndRef.current;
         setNdrag(false);
-        if (!d || !d.moved) return;
+        if (!d) return;
+        // v23: the rubber band ends here — the blocks it touched are selected.
+        if (d.mode === "marq") {
+          setMarq(null);
+          if (!d.moved) { setSel([]); return; }   // a plain click clears the selection
+          var r = marqRect(d);
+          var hit = [];
+          viewRef.current.placed.forEach(function (q, id) {
+            var nd = mdl.nodeMap.get(id);
+            if (nd && fitsHide(nd, props.hideSt)) return;
+            var bw = (q.w && q.w >= 60) ? q.w : G.W, bh = (q.h && q.h >= 36) ? q.h : G.H;
+            if (q.x < r.x + r.w && q.x + bw > r.x && q.y < r.y + r.h && q.y + bh > r.y) hit.push(id);
+          });
+          setSel(d.add ? uniq((selRef.current || []).concat(hit)) : hit);
+          return;
+        }
+        if (!d.moved) {
+          // v23: a click (no drag) on a block toggles its membership — the
+          // rubber band is not the only way to build a selection.
+          if (d.mode === "move") {
+            var s0 = d.sel0 || [];
+            if (s0.indexOf(d.id) >= 0) setSel(s0.filter(function (x) { return x !== d.id; }));
+            else setSel(d.add ? uniq(s0.concat([d.id])) : [d.id]);
+          }
+          return;
+        }
         // v17: a resize gesture just persists as-is — no lattice settle, the
         // block keeps its shape and spot.
         if (d.mode === "res") {
@@ -2462,23 +2581,30 @@
           return;
         }
         var box = blockBox();
-        var cur = (ovRef.current || {})[d.id] || { x: d.ox, y: d.oy };
+        var nxt = Object.assign({}, ovRef.current);
+        var out = {};
+        viewRef.current.placed.forEach(function (q, id) { if (nxt[id]) out[id] = nxt[id]; });
         // v21 (user 2026-10-13): the drop STAYS where the pointer left it —
         // clamped to the card border, nothing else. The old collision hop
         // spiralled the block to the "nearest free cell", so the user could
         // never park a block exactly where they wanted. Overlaps are allowed
         // by design now; "自动排列" re-tidies the card on command.
-        var fp = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1) };
-        if (cur.w) fp.w = cur.w;
-        if (cur.h) fp.h = cur.h;
-        var nxt = Object.assign({}, ovRef.current);
-        nxt[d.id] = fp;
+        for (var i = 0; i < d.ids.length; i++) {
+          var id2 = d.ids[i];
+          var cur = nxt[id2] || d.base[id2];
+          if (!cur) continue;
+          var fp = { x: clamp(cur.x, box.x0, box.x1), y: clamp(cur.y, box.y0, box.y1) };
+          if (cur.w) fp.w = cur.w;
+          if (cur.h) fp.h = cur.h;
+          nxt[id2] = fp;
+          out[id2] = fp;
+        }
         ovRef.current = nxt;
         setOv(nxt);
-        var out = {};
-        viewRef.current.placed.forEach(function (q, id) { if (nxt[id]) out[id] = nxt[id]; });
-        out[d.id] = fp;
         writeMiniPos(props.pid, out);
+        // v23: a block dragged on its own becomes the selection, so the next
+        // drag (or a shift-click) can pick up a group.
+        if (d.mode === "move" && (d.sel0 || []).indexOf(d.id) < 0) setSel(d.ids.slice());
       }
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
@@ -2490,13 +2616,80 @@
       };
     }, [ndrag, props.pid]);
 
+    // client px -> the card's model units (its own lattice)
+    function toModel(e) {
+      var el = svgRef.current;
+      if (!el) return null;
+      var r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      var z = scaleRef.current || 1, o = offRef.current;
+      return { x: (e.clientX - r.left) / z - o.offX, y: (e.clientY - r.top) / z - o.offY };
+    }
+    function marqRect(d) {
+      return {
+        x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1),
+        w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0)
+      };
+    }
+    function uniq(a) {
+      var o = [], i;
+      for (i = 0; i < a.length; i++) if (o.indexOf(a[i]) < 0) o.push(a[i]);
+      return o;
+    }
+    // how far the dragged GROUP may travel before it leaves the card
+    function groupLimits(d, box) {
+      var minX = Infinity, minY = Infinity, maxR = -Infinity, maxB = -Infinity;
+      for (var i = 0; i < d.ids.length; i++) {
+        var b = d.base[d.ids[i]];
+        if (!b) continue;
+        var w = (b.w && b.w >= 60) ? b.w : G.W, hh = (b.h && b.h >= 36) ? b.h : G.H;
+        if (b.x < minX) minX = b.x;
+        if (b.y < minY) minY = b.y;
+        if (b.x + w > maxR) maxR = b.x + w;
+        if (b.y + hh > maxB) maxB = b.y + hh;
+      }
+      if (!isFinite(minX)) return { x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1 };
+      var x0 = box.x0 - minX, x1 = (box.x1 + G.W) - maxR;
+      var y0 = box.y0 - minY, y1 = (box.y1 + G.H) - maxB;
+      if (x0 > x1) { x0 = x1 = (x0 + x1) / 2; }
+      if (y0 > y1) { y0 = y1 = (y0 + y1) / 2; }
+      return { x0: x0, x1: x1, y0: y0, y1: y1 };
+    }
+
     function onBlockDown(n, e) {
       if (e.pointerType === "mouse" && e.button != null && e.button !== 0) return;
       var cur = (ovRef.current || {})[n.id] || viewRef.current.placed.get(n.id);
       if (!cur) return;
       e.stopPropagation();
       e.preventDefault();
-      ndRef.current = { id: n.id, sx: e.clientX, sy: e.clientY, ox: cur.x, oy: cur.y, moved: false };
+      // v23 (user 2026-10-21): grabbing a block that is part of the selection
+      // picks up the WHOLE selection; an unselected block is taken alone.
+      var cur2 = selRef.current || [];
+      var ids = (cur2.indexOf(n.id) >= 0) ? cur2.slice() : [n.id];
+      var base = {};
+      for (var i = 0; i < ids.length; i++) {
+        var q = (ovRef.current || {})[ids[i]] || viewRef.current.placed.get(ids[i]);
+        if (!q) continue;
+        base[ids[i]] = { x: q.x, y: q.y, w: q.w, h: q.h };
+      }
+      if (!base[n.id]) { ids = [n.id]; base[n.id] = { x: cur.x, y: cur.y, w: cur.w, h: cur.h }; }
+      ndRef.current = { id: n.id, mode: "move", ids: ids, base: base, sel0: cur2.slice(),
+                        sx: e.clientX, sy: e.clientY, ox: base[n.id].x, oy: base[n.id].y,
+                        moved: false, add: !!(e.shiftKey || e.ctrlKey || e.metaKey) };
+      setNdrag(true);
+    }
+
+    // v23: the card BACKGROUND starts a rubber band. Blocks stopPropagation,
+    // so this only fires on empty canvas.
+    function onBodyDown(e) {
+      if (e.pointerType === "mouse" && e.button != null && e.button !== 0) return;
+      var p0 = toModel(e);
+      if (!p0) return;
+      e.preventDefault();
+      ndRef.current = { mode: "marq", sx: e.clientX, sy: e.clientY,
+                        x0: p0.x, y0: p0.y, x1: p0.x, y1: p0.y, moved: false,
+                        add: !!(e.shiftKey || e.ctrlKey || e.metaKey) };
+      setMarq({ x: p0.x, y: p0.y, w: 0, h: 0 });
       setNdrag(true);
     }
 
@@ -2507,7 +2700,7 @@
       if (!cur) return;
       e.stopPropagation();
       e.preventDefault();
-      ndRef.current = { id: n.id, mode: "res", sx: e.clientX, sy: e.clientY,
+      ndRef.current = { id: n.id, mode: "res", ids: [n.id], base: {}, sx: e.clientX, sy: e.clientY,
                         ox: cur.x, oy: cur.y, ow: cur.w || G.W, oh: cur.h || G.H, moved: false };
       setNdrag(true);
     }
@@ -2534,19 +2727,27 @@
         }, h("path", { className: "kg-arrow", d: "M 0 0 L 10 5 L 0 10 z" })));
       kids.push(defs);
       kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, ""));
+      var selSet = {}; (sel || []).forEach(function (id) { selSet[id] = 1; });
       var ordered = [];
       mdl.nodeMap.forEach(function (n) { ordered.push(n); });
       ordered.forEach(function (n) {
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: "", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
+        kids.push(renderNode(n, pos, G, { cls: selSet[n.id] ? " kg-sel" : "", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
       pin.group.nodes.forEach(function (n) {
         if (mdl.nodeMap.has(n.id)) return;
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: " kg-uln", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
+        kids.push(renderNode(n, pos, G, { cls: " kg-uln" + (selSet[n.id] ? " kg-sel" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
+      // v23: the rubber band sits ON TOP of the blocks it covers
+      if (marq) {
+        kids.push(h("rect", {
+          key: "marq", className: "kg-marquee",
+          x: marq.x, y: marq.y, width: Math.max(0, marq.w), height: Math.max(0, marq.h)
+        }));
+      }
     }
     var body;
     if (!pin.group.nodes.length) body = h("div", { className: "kg-pempty" }, "无任务");
@@ -2554,7 +2755,8 @@
     else body = h("div", { className: "kg-pfit" + (ndrag ? " kg-grabbing" : ""), style: { width: (cw * scale) + "px", height: (ch * scale) + "px" } },
           h("svg", {
             className: "kg-mini", width: cw * scale, height: ch * scale,
-            viewBox: (-offX) + " " + (-offY) + " " + cw + " " + ch
+            viewBox: (-offX) + " " + (-offY) + " " + cw + " " + ch,
+            ref: svgRef, onPointerDown: onBodyDown
           }, kids));
     return h("div", { className: "kg-pbody", ref: ref }, body);
   }
