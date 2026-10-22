@@ -139,6 +139,89 @@
 .kg-arrow { fill: currentColor; opacity: .6; }
 /* dimmed by selection highlight (kept after status rules so it wins) */
 .kg-dim { opacity: .18; transition: opacity 150ms ease; }
+/* v24: highlighted edges (selected task block's connections) */
+.kg-edge.kg-hl {
+  stroke: #3b82f6;
+  stroke-opacity: 1;
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 3px rgba(59, 130, 246, .7));
+}
+/* flowing animation for highlighted edges */
+@keyframes kg-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -20; }
+}
+.kg-edge.kg-hl {
+  stroke-dasharray: 8 4;
+  animation: kg-flow 0.8s linear infinite;
+}
+.kg-edge.kg-hl.kg-back {
+  stroke: #ef4444;
+  stroke-dasharray: 6 4;
+  animation: kg-flow 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kg-edge.kg-hl, .kg-edge.kg-hl.kg-back { animation: none; }
+}
+/* highlighted task blocks (related to selected) */
+.kg-node.kg-hl .kg-box {
+  stroke: #3b82f6;
+  stroke-width: 2.4;
+  stroke-opacity: 1;
+  fill-opacity: .22;
+  filter: drop-shadow(0 0 4px rgba(59, 130, 246, .8));
+}
+
+/* v24: per-card status filter — button lives in the card header, the checkbox
+   dropdown is rendered by the card (so it survives the slim-strip state) */
+.kg-pfilt {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .16));
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: .42;
+  transition: opacity 120ms ease;
+}
+.kg-panel:hover .kg-pfilt { opacity: .9; }
+.kg-pfilt:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
+.kg-pfilt.kg-pfilt-on { opacity: 1; border-color: rgba(56, 189, 248, .55); color: #7dd3fc; }
+.kg-pfilter-dropdown {
+  position: absolute;
+  top: 30px;
+  right: 4px;
+  z-index: 20;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 6px;
+  min-width: 132px;
+  max-height: calc(100% - 34px);
+  overflow: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+/* a slim strip is only 28px tall: let the dropdown escape the card */
+.kg-panel.kg-filteropen { overflow: visible; z-index: 30; }
+.kg-pfilter-float { max-height: 50vh; }
+.kg-pfilter-hdr { font-size: 10px; opacity: .55; padding: 1px 4px 4px; }
+.kg-pfilter-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.kg-pfilter-item:hover { background: rgba(255, 255, 255, 0.08); }
+.kg-pfilter-item input { margin: 0; cursor: pointer; }
+.kg-pfilter-item.kg-pfilter-off { opacity: 0.4; }
 
 /* unlinked tasks: same blocks on canvas, slightly lighter */
 .kg-node.kg-uln .kg-box { fill-opacity: .08; stroke-opacity: .75; }
@@ -324,6 +407,7 @@
 .kg-gx:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
 .kg-gbody { position: absolute; }
 .kg-gbody > .kg-panel { z-index: 3; }
+.kg-gbody > .kg-panel.kg-filteropen { z-index: 30; }
 
 /* a card that lives inside a group is a touch denser */
 .kg-panel.kg-pinner { border-radius: 8px; }
@@ -380,6 +464,25 @@
 }
 .kg-panel:hover .kg-pauto, .kg-group:hover .kg-gauto { opacity: .9; }
 .kg-pauto:hover, .kg-gauto:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
+
+/* v24: group hide/show button */
+.kg-ghide {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, .16));
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: .42;
+  transition: opacity 120ms ease;
+}
+.kg-group:hover .kg-ghide { opacity: .9; }
+.kg-ghide:hover { opacity: 1; background: rgba(255, 255, 255, .08); }
 
 /* ── drag reference grid: visible only while a card / node is being dragged ── */
 .kg-grid {

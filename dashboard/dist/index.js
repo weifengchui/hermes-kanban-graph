@@ -129,12 +129,14 @@
   var LS_POS = "hermes.kanbangraph.pos.";
   var LS_UL = "hermes.kanbangraph.showUl";
   var LS_HIDE = "hermes.kanbangraph.hideSt"; // status chip filter: hidden statuses
+  var LS_CARD_HIDE = "hermes.kanbangraph.cardHide."; // + profile => { status: 1 } per-card status filter
   var LS_MODE = "hermes.kanbangraph.mode"; // "multi" | "single"
   var LS_SCOPE = "hermes.kanbangraph.scope"; // "" = every board
   var LS_HIDEP = "hermes.kanbangraph.hiddenProfiles";
   var LS_LAYOUT = "hermes.kanbangraph.layout."; // + scope key
   var LS_XEDGE = "hermes.kanbangraph.crossEdges"; // "1" = draw cross-profile wires
   var LS_GROUPS = "hermes.kanbangraph.groups."; // + scope key => [{id,name,members,inner}]
+  var LS_HIDEG = "hermes.kanbangraph.hiddenGroups."; // + scope key => [gid]
   var LS_MAXED = "hermes.kanbangraph.maxed."; // + scope key => maximised card id ("" = none)
   var LS_MINIPOS = "hermes.kanbangraph.miniPos."; // + profile => { nodeId: {x,y} } inside a panel
   var LS_GRID = "hermes.kanbangraph.grid"; // "0" = no drag reference grid
@@ -205,7 +207,12 @@
       if (obj && typeof obj === "object") {
         Object.keys(obj).forEach(function (k) {
           var p = obj[k];
-          if (p && typeof p.x === "number" && typeof p.y === "number") out[k] = { x: p.x, y: p.y };
+          if (!p || typeof p.x !== "number" || typeof p.y !== "number") return;
+          var e = { x: p.x, y: p.y };
+          // v24: manual block size rides along with the position
+          if (typeof p.w === "number" && p.w >= 60 && p.w <= 900) e.w = p.w;
+          if (typeof p.h === "number" && p.h >= 36 && p.h <= 700) e.h = p.h;
+          out[k] = e;
         });
       }
       return out;
@@ -226,6 +233,35 @@
     } catch (e) { return {}; }
   }
   function writeHide(m) { lsSet(LS_HIDE, JSON.stringify(Object.keys(m || {}))); }
+
+  // v24: per-card status filter: { profile: { status: 1 } }
+  function readCardHide(prof) {
+    if (!prof) return {};
+    try {
+      var arr = JSON.parse(lsGet(LS_CARD_HIDE + prof) || "[]"), m = {};
+      if (Array.isArray(arr)) arr.forEach(function (st) { m[st] = 1; });
+      return m;
+    } catch (e) { return {}; }
+  }
+  function writeCardHide(prof, m) {
+    if (!prof) return;
+    if (m && Object.keys(m).length) lsSet(LS_CARD_HIDE + prof, JSON.stringify(Object.keys(m)));
+    else { try { localStorage.removeItem(LS_CARD_HIDE + prof); } catch (e) { /* ignore */ } }
+  }
+
+  // v24: hidden group cards, per scope
+  function readHiddenGroups(k) {
+    try {
+      var arr = JSON.parse(lsGet(LS_HIDEG + k) || "[]"), m = {};
+      if (Array.isArray(arr)) arr.forEach(function (g) { if (g) m[String(g)] = 1; });
+      return m;
+    } catch (e) { return {}; }
+  }
+  function writeHiddenGroups(k, m) {
+    var keys = Object.keys(m || {});
+    if (keys.length) lsSet(LS_HIDEG + k, JSON.stringify(keys));
+    else { try { localStorage.removeItem(LS_HIDEG + k); } catch (e) { /* ignore */ } }
+  }
 
   // persisted hidden profiles
   function readHiddenProf() {
@@ -851,8 +887,9 @@
       placed.set(ids[i], p);
     }
     placed.forEach(function (q) {
-      if (q.x + G.W > maxX) maxX = q.x + G.W;
-      if (q.y + G.H > maxY) maxY = q.y + G.H;
+      var qw = (q.w && q.w >= 60) ? q.w : G.W, qh = (q.h && q.h >= 36) ? q.h : G.H;
+      if (q.x + qw > maxX) maxX = q.x + qw;
+      if (q.y + qh > maxY) maxY = q.y + qh;
     });
     if (placed.size === 0) return { placed: placed, width: mdl.width, height: mdl.height };
     return {
@@ -1950,10 +1987,11 @@
   }
 
   // dimOne(e) => true hides the edge's emphasis (selection neighbourhood)
+  // v24: highlightOne(e) => true marks the edge as highlighted (selected task's connections)
   // v18 (user 2026-10-12): ONE edge style — curve. Same-row/col pairs get a
   // dead-straight segment between the facing edges; anything crossing rows and
   // columns arcs around the grid. The old straight/lane router is retired.
-  function renderEdges(model, view, hideSt, marker, dimOne) {
+  function renderEdges(model, view, hideSt, marker, dimOne, highlightOne) {
     var out = [];
     if (!(model.edges.length || model.backEdges.length)) return out;
     var G = model.geo || GEO_MAIN;
@@ -1967,9 +2005,10 @@
       var pp = { x: p.x, y: p.y, w: p.w || G.W, h: p.h || G.H };
       var cc = { x: c.x, y: c.y, w: c.w || G.W, h: c.h || G.H };
       var dim0 = dimOne && dimOne(e);
+      var hl0 = highlightOne && highlightOne(e);
       return h("path", {
         key: (back ? "b" : "e") + idx,
-        className: "kg-edge kg-curve" + (back ? " kg-back" : "") + (dim0 ? " kg-dim" : ""),
+        className: "kg-edge kg-curve" + (back ? " kg-back" : "") + (dim0 ? " kg-dim" : "") + (hl0 ? " kg-hl" : ""),
         d: edgePathGeo(pp, cc),
         markerEnd: marker ? "url(#" + marker + ")" : undefined
       });
@@ -2056,6 +2095,8 @@
       Object.keys(raw).forEach(function (k) {
         var q = raw[k];
         fixed[k] = { x: Math.max(0, q.x), y: Math.max(0, q.y) };
+        if (q.w) fixed[k].w = q.w;
+        if (q.h) fixed[k].h = q.h;
       });
       setPosOv(fixed);
       if (lastFit.current !== board) { lastFit.current = board; pendingFit.current = true; }
@@ -2118,6 +2159,7 @@
     }, [dragging]);
 
     // node dragging (positions override the layered layout, persisted per board)
+    // v24: added resize mode — corner grip grows/shrinks the block
     useEffect(function () {
       if (!ndragging) return;
       function move(e) {
@@ -2127,6 +2169,19 @@
         if (!d.moved && Math.abs(ddx) + Math.abs(ddy) > 4) d.moved = true;
         if (!d.moved) return;
         var z = zoomRef.current || 1;
+        // v24: resize mode
+        if (d.mode === "res") {
+          var nw = clamp(Math.round((d.ow + ddx / z) / 2) * 2, Math.round(GEO_MAIN.W * 0.6), GEO_MAIN.W * 4);
+          var nh = clamp(Math.round((d.oh + ddy / z) / 2) * 2, Math.round(GEO_MAIN.H * 0.6), GEO_MAIN.H * 4);
+          if (d.last && d.last.w === nw && d.last.h === nh) return;
+          d.last = { w: nw, h: nh };
+          var q0 = (posOvRef.current || {})[d.id] || { x: d.ox, y: d.oy };
+          var nres = Object.assign({}, posOvRef.current);
+          nres[d.id] = { x: q0.x, y: q0.y, w: nw, h: nh };
+          posOvRef.current = nres;
+          setPosOv(nres);
+          return;
+        }
         // free 1:1 tracking, magnetise per-axis when close to the lattice
         var fx = d.ox + ddx / z, fy = d.oy + ddy / z;
         var gx = snapCell({ x: fx, y: fy });
@@ -2137,6 +2192,10 @@
         var np = { x: fx, y: fy };
         d.last = np;
         var nxt = Object.assign({}, posOvRef.current);
+        // v24: carry over manual size if present
+        var q1 = nxt[d.id];
+        if (q1 && q1.w) np.w = q1.w;
+        if (q1 && q1.h) np.h = q1.h;
         nxt[d.id] = np;
         posOvRef.current = nxt;
         setPosOv(nxt);
@@ -2146,12 +2205,24 @@
         setNDragging(false);
         if (d && d.moved) {
           ndSuppressClick.current = true;
+          // v24: resize mode just persists
+          if (d.mode === "res") {
+            var o1 = {};
+            viewRef.current.placed.forEach(function (q, id) {
+              var v = (posOvRef.current || {})[id];
+              if (v) o1[id] = v;
+            });
+            writePos(board, o1);
+            return;
+          }
           // v21 (user 2026-10-13): release keeps the tracked position — the
           // magnet in move() already snapped it when close to the lattice.
           // The old forced nearest-cell settle + downward yield moved the block
           // away from where the pointer left it and re-flowed siblings.
           var cur = (posOvRef.current || {})[d.id] || { x: d.ox, y: d.oy };
           var fp = { x: Math.max(0, cur.x), y: Math.max(0, cur.y) };
+          if (cur.w) fp.w = cur.w;
+          if (cur.h) fp.h = cur.h;
           var nxt = Object.assign({}, posOvRef.current);
           nxt[d.id] = fp;
           posOvRef.current = nxt;
@@ -2220,7 +2291,17 @@
           if (e.pointerType === "mouse" && e.button != null && e.button !== 0) return;
           var p = viewRef.current.placed.get(id);
           if (!p) return;
-          ndRef.current = { id: id, sx: e.clientX, sy: e.clientY, ox: p.x, oy: p.y, moved: false };
+          ndRef.current = { id: id, mode: "move", sx: e.clientX, sy: e.clientY, ox: p.x, oy: p.y, moved: false };
+          setNDragging(true);
+        },
+        onResizeDown: function (e) {
+          if (e.pointerType === "mouse" && e.button != null && e.button !== 0) return;
+          var p = viewRef.current.placed.get(id);
+          if (!p) return;
+          e.stopPropagation();
+          e.preventDefault();
+          ndSuppressClick.current = false;
+          ndRef.current = { id: id, mode: "res", sx: e.clientX, sy: e.clientY, ox: p.x, oy: p.y, ow: p.w || GEO_MAIN.W, oh: p.h || GEO_MAIN.H, moved: false };
           setNDragging(true);
         },
         onClick: function (e) {
@@ -2295,17 +2376,20 @@
       : "这块板还没有依赖关系";
 
     var dimOf = highlight ? function (e) { return !(highlight.has(e.parent) && highlight.has(e.child)); } : null;
-    var svgChildren = renderEdges(model, view, hideSt, "kg-arrow", dimOf);
+    var hlOf = highlight ? function (e) { return highlight.has(e.parent) && highlight.has(e.child); } : null;
+    var svgChildren = renderEdges(model, view, hideSt, "kg-arrow", dimOf, hlOf);
     function nodeEl(n, extraCls) {
       var pos = view.placed.get(n.id);
       if (!pos) return null;
       if (hideSt[n.status]) return null;
       var dim = highlight && !highlight.has(n.id);
+      var hl = highlight && highlight.has(n.id);
       var isDrag = ndragging && ndRef.current && ndRef.current.id === n.id;
       return renderNode(n, pos, GEO_MAIN, {
-        cls: (dim ? " kg-dim" : "") + (selected === n.id ? " kg-sel" : "") + (isDrag ? " kg-ndrag" : "") + (extraCls || ""),
+        cls: (dim ? " kg-dim" : "") + (selected === n.id ? " kg-sel" : "") + (hl && selected !== n.id ? " kg-hl" : "") + (isDrag ? " kg-ndrag" : "") + (extraCls || ""),
         comet: COMET_D,
-        handlers: nodeHandlers(n.id)
+        handlers: nodeHandlers(n.id),
+        hsz: Math.max(4, Math.round(9 / (zoom || 1)))
       });
     }
     var ordered = [];
@@ -2409,13 +2493,17 @@
     // "排列" on the card clears this profile's manual block positions
     useEffect(function () { setOv(readMiniPos(props.pid)); }, [props.ver, props.pid]);
 
-    // v15 (user 2026-10-12): the block grid RE-FITS to the card. Once fillWall
-    // stretched a card the height fit governed scale and blocks left a side
-    // margin — ktfEffGeo hands that leftover to the block width itself (aspect
-    // guarded). Width-governed cards keep the base lattice, as before.
+    // v24 (user): the block grid is pinned to the card's HUG geometry, not the
+    // live card box — resizing a card then only changes the viewport (the body
+    // scrolls) and never re-widens blocks or re-flows columns behind the user.
+    // (v15's fill-the-stretched-card widening is what made blocks change size
+    // on every resize.)
+    var hug = cardHugSize(pin.model.width, pin.model.height);
+    var refW = Math.max(1, hug.w);
+    var refH = Math.max(1, hug.h - HUG_HEAD);
     var eff = useMemo(function () {
-      return ktfEffGeo(pin.model.nodeMap.size, pin.w, pin.h, pin.cap);
-    }, [pin.model, pin.w, pin.h, pin.cap]);
+      return ktfEffGeo(pin.model.nodeMap.size, refW, refH, pin.cap);
+    }, [pin.model, refW, refH, pin.cap]);
     var G = eff.geo;
     var mdl = useMemo(function () {
       if (!eff.changed) return pin.model;
@@ -2425,9 +2513,15 @@
 
     // the drawing area is pinned to the *auto* layout box (not the live view box)
     // so dragging a block never rescales the whole card mid-gesture
+    // v24 (user): resizing a card must NOT rescale its blocks. Normal cards pin
+    // the scale at the hug target (the size their auto-layout was designed for),
+    // so the blocks keep their pixel size and the card simply scrolls. Only the
+    // maximised focus view still fits-to-screen (it is a mode, not a resize).
     var vw = Math.max(1, mdl.width), vh = Math.max(1, mdl.height);
     if (pin.w > 4 && pin.h > 4) {
-      scale = clamp(Math.min((pin.w - 4) / vw, (pin.h - 4) / vh), MINI_SCALE_MIN, pin.cap);
+      scale = props.big
+        ? clamp(Math.min((pin.w - 4) / vw, (pin.h - 4) / vh), MINI_SCALE_MIN, pin.cap)
+        : HUG_TS;
     }
     var scaleRef = useRef(scale); scaleRef.current = scale;
     // v10: the canvas is the CARD, not the content bbox — blocks may be parked
@@ -2726,20 +2820,37 @@
           markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
         }, h("path", { className: "kg-arrow", d: "M 0 0 L 10 5 L 0 10 z" })));
       kids.push(defs);
-      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, ""));
+      // v24: compute highlight set from selection (plain compute — a hook here
+      // would be called conditionally and break the hook order)
+      var hlSet = null;
+      if (sel && sel.length) {
+        hlSet = new Set();
+        sel.forEach(function (id) {
+          collect(id, mdl.children, mdl.parents).forEach(function (sid) { hlSet.add(sid); });
+        });
+      }
+      var dimOf = hlSet ? function (e) { return !(hlSet.has(e.parent) && hlSet.has(e.child)); } : null;
+      var hlOf = hlSet ? function (e) { return hlSet.has(e.parent) && hlSet.has(e.child); } : null;
+      kids = kids.concat(renderEdges(mdl, view, props.hideSt, "kga-" + props.pid, dimOf, hlOf));
       var selSet = {}; (sel || []).forEach(function (id) { selSet[id] = 1; });
       var ordered = [];
       mdl.nodeMap.forEach(function (n) { ordered.push(n); });
       ordered.forEach(function (n) {
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: selSet[n.id] ? " kg-sel" : "", comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
+        var isSel = !!selSet[n.id];
+        var isHl = hlSet && hlSet.has(n.id) && !isSel;
+        var isDim = hlSet && !hlSet.has(n.id);
+        kids.push(renderNode(n, pos, G, { cls: (isSel ? " kg-sel" : "") + (isHl ? " kg-hl" : "") + (isDim ? " kg-dim" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
       pin.group.nodes.forEach(function (n) {
         if (mdl.nodeMap.has(n.id)) return;
         var pos = view.placed.get(n.id);
         if (!pos || fitsHide(n, props.hideSt)) return;
-        kids.push(renderNode(n, pos, G, { cls: " kg-uln" + (selSet[n.id] ? " kg-sel" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
+        var isSel = !!selSet[n.id];
+        var isHl = hlSet && hlSet.has(n.id) && !isSel;
+        var isDim = hlSet && !hlSet.has(n.id);
+        kids.push(renderNode(n, pos, G, { cls: " kg-uln" + (isSel ? " kg-sel" : "") + (isHl ? " kg-hl" : "") + (isDim ? " kg-dim" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
       // v23: the rubber band sits ON TOP of the blocks it covers
       if (marq) {
@@ -2758,7 +2869,7 @@
             viewBox: (-offX) + " " + (-offY) + " " + cw + " " + ch,
             ref: svgRef, onPointerDown: onBodyDown
           }, kids));
-    return h("div", { className: "kg-pbody", ref: ref }, body);
+    return h("div", { className: "kg-pbody", ref: ref, style: { position: "relative" } }, body);
   }
 
   // ─────────────────────────── multi-profile view ───────────────────────────
@@ -2766,6 +2877,10 @@
     var boards = props.boards || [], scope = props.scope, graphs = props.graphs, error = props.error;
     var s;
     s = useState(readHiddenProf); var hidden = s[0], setHidden = s[1];
+    // v24: hidden group cards (persisted per scope) + per-card filter UI state
+    s = useState(function () { return readHiddenGroups(scopeKey(props.scope)); }); var hiddenGroups = s[0], setHiddenGroups = s[1];
+    s = useState(0); var cardVer = s[0], setCardVer = s[1]; // bump = per-card filter changed
+    s = useState(""); var openFilter = s[0], setOpenFilter = s[1]; // profile whose filter dropdown is open
     s = useState(lsGet(LS_XEDGE) === "1"); var showCross = s[0], setShowCross = s[1];
     s = useState(readGrid); var gridOn = s[0], setGridOn = s[1];
     s = useState(function () { return readLayout(scopeKey(props.scope)); }); var layout = s[0], setLayout = s[1];
@@ -2820,7 +2935,21 @@
       setGcfg(readGroups(k));
       setMaxed(readMaxed(k));
       setStripWs(readStripWs(k));
+      setHiddenGroups(readHiddenGroups(k));
+      setOpenFilter("");
     }, [scope]);
+
+    // v24: clicking anywhere outside the per-card filter UI closes its dropdown
+    useEffect(function () {
+      if (!openFilter) return;
+      function close(e) {
+        var t = e.target;
+        if (t && t.closest && t.closest(".kg-pfilter-dropdown, .kg-pfilt")) return;
+        setOpenFilter("");
+      }
+      document.addEventListener("pointerdown", close);
+      return function () { document.removeEventListener("pointerdown", close); };
+    }, [openFilter]);
 
     // v20.1 (user: 全屏时右侧留白): the pinned manual rects carry the OLD
     // viewport width — inside fullscreen the wall must spread to the bigger
@@ -2901,7 +3030,7 @@
         c.members.forEach(function (m) {
           if (isTok(m)) {
             var ch = cfgOf[tokGid(m)];
-            if (!ch || depth >= NEST_MAX || visiting[ch.id] || parentOf[ch.id] !== c.id) return;
+            if (!ch || hiddenGroups[ch.id] || depth >= NEST_MAX || visiting[ch.id] || parentOf[ch.id] !== c.id) return;
             visiting[ch.id] = 1;
             var sub = resolve(ch, depth + 1);
             delete visiting[ch.id];
@@ -2913,7 +3042,7 @@
         return kids;
       }
       function visBlocks(k) {
-        if (k.kind === "prof") { var pn = panels[k.prof.name]; return visibleBlocks(pn && pn.model, props.hideSt); }
+        if (k.kind === "prof") { var pn = panels[k.prof.name]; return visibleBlocks(pn && pn.model, effHideOf(k.prof.name)); }
         var n = 0; k.children.forEach(function (q) { n += visBlocks(q); });
         return n;
       }
@@ -2938,7 +3067,7 @@
       visible.forEach(function (g) {
         var gid = owner[g.name];
         if (!gid) { out.push({ id: g.name, kind: "prof", prof: g }); return; }
-        if (seen[gid]) return;
+        if (seen[gid] || hiddenGroups[gid]) return;
         seen[gid] = 1;
         var cfg = cfgOf[gid];
         if (!cfg) { out.push({ id: g.name, kind: "prof", prof: g }); return; }
@@ -2947,7 +3076,7 @@
         out.push({ id: GKEY + gid, kind: "group", cfg: cfg, children: kids });
       });
       return { items: out, cfgOf: cfgOf, parentOf: parentOf, visBlocks: visBlocks, kidTok: kidTok, kidWeight: kidWeight, kidName: kidName, orderKids: orderKids, collectProfs: collectProfs };
-    }, [visible, gcfg, byName, hidden, panels, props.hideSt]);
+    }, [visible, gcfg, byName, hidden, panels, props.hideSt, hiddenGroups, cardVer]);
     var items = nest.items;
     // debug handle (harmless; headless probes assert through this)
     window.__KG_NEST__ = { parentOf: nest.parentOf, items: items.map(function (i) { return i.id; }), byName: Object.keys(byName) };
@@ -2958,7 +3087,7 @@
     function kidMeta(k) {
       if (k.kind === "prof") {
         var pn = panels[k.prof.name];
-        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) {
+        if (visibleBlocks(pn && pn.model, effHideOf(k.prof.name)) === 0) {
           var tok = nest.kidTok(k), manW = stripWs[tok] ? Math.max(STRIP_RESIZE_MIN, stripWs[tok]) : 0;
           return { slim: 1, sw: manW || stripW(k.prof.name) };
         }
@@ -2983,7 +3112,7 @@
       // v12: a collapsed strip shrinks to CONTENT width too (storage keeps the
       // expanded width untouched, so it grows straight back on re-entry)
       // v13: a manual strip width (dragged on the shelf) wins over content width
-      if (visibleBlocks(pn && pn.model, props.hideSt) !== 0)
+      if (visibleBlocks(pn && pn.model, effHideOf(it.prof.name)) !== 0)
         return { x: r.x, y: r.y, w: r.w, h: Math.max(r.h, PMIN_H) };
       var w = stripWs[id] ? Math.max(STRIP_RESIZE_MIN, stripWs[id]) : stripW(it.prof.name);
       return { x: r.x, y: r.y, w: Math.min(w, csizeRef.current.w - 2 * STRIP_GAP), h: STRIP_H };
@@ -3003,7 +3132,7 @@
       items.forEach(function (it) {
         if (it.kind !== "prof") return;
         var pn = panels[it.prof.name];
-        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) slimIds[it.id] = 1;
+        if (visibleBlocks(pn && pn.model, effHideOf(it.prof.name)) === 0) slimIds[it.id] = 1;
       });
       var fulls = items.filter(function (it) { return !slimIds[it.id]; });
       var strips = items.filter(function (it) { return !!slimIds[it.id]; });
@@ -3092,7 +3221,7 @@
           if (!q) return;
           if (k.kind === "prof") {
             var pn = panels[k.prof.name];
-            ir[t] = visibleBlocks(pn && pn.model, props.hideSt) === 0
+            ir[t] = visibleBlocks(pn && pn.model, effHideOf(k.prof.name)) === 0
               ? { x: q.x, y: q.y, w: q.w, h: STRIP_H_IN }
               : { x: q.x, y: q.y, w: q.w, h: Math.max(q.h, IMIN_H) };
             return;
@@ -3118,7 +3247,7 @@
       });
       nestAbsRef.current = abs;
       return out;
-    }, [items, shown, panels, props.hideSt, nest, stripWs]);
+    }, [items, shown, panels, props.hideSt, nest, stripWs, cardVer]);
 
     var inv = useMemo(function () {
       if (!frozenInRef.current) return innerRects;
@@ -3160,7 +3289,7 @@
           // the poll) is NOT a collapse — recording it as one made every group
           // with stored rects take a false wake as soon as data landed.
           if (!pn) return;
-          cur[c.id + "/" + m] = visibleBlocks(pn && pn.model, props.hideSt) === 0 ? 1 : 0;
+          cur[c.id + "/" + m] = visibleBlocks(pn && pn.model, effHideOf(m)) === 0 ? 1 : 0;
         });
       });
       var prev = slimRef.current;
@@ -3169,7 +3298,7 @@
       wakeGroupsSlim(prev, cur, gcfgRef.current || []).forEach(function (gid) {
         autoArrangeCard(gid, "", false);
       });
-    }, [gcfg, panels, props.hideSt, hidden]);
+    }, [gcfg, panels, props.hideSt, hidden, cardVer]);
 
     // v17 (2026-10-12) auto-PINNED the first computed slot into the layout so
     // refreshes wouldn't reshuffle. That design is RETIRED (v22, user
@@ -3711,7 +3840,7 @@
         var g = byName[name];
         var pn = panels[name];
         var r;
-        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) {
+        if (visibleBlocks(pn && pn.model, effHideOf(name)) === 0) {
           // v10: an empty card keeps its place but drops to a title-row strip
           var cur = layoutRef.current[name] || view[name];
           r = {
@@ -3763,6 +3892,65 @@
       window.dispatchEvent(new CustomEvent("kg-hidep"));  // v20.2: keep the status bar in sync
     }
 
+    // v24: toggle hidden group (persisted per scope; a hidden group card leaves
+    // the wall entirely — restore it from the "已隐藏分组" chips in the toolbar)
+    function toggleHiddenGroup(gid) {
+      setHiddenGroups(function (prev) {
+        var nxt = Object.assign({}, prev);
+        if (nxt[gid]) delete nxt[gid]; else nxt[gid] = 1;
+        writeHiddenGroups(scopeKey(props.scope), nxt);
+        return nxt;
+      });
+    }
+
+    // v24: per-card status filter helpers
+    function effHideOf(name) {
+      var m = Object.assign({}, props.hideSt || {});
+      var extra = readCardHide(name);
+      Object.keys(extra).forEach(function (st) { m[st] = 1; });
+      return m;
+    }
+    function toggleCardHide(name, st) {
+      var cur = readCardHide(name);
+      if (cur[st]) delete cur[st]; else cur[st] = 1;
+      writeCardHide(name, cur);
+      setCardVer(function (v) { return v + 1; });
+    }
+    // v24: the dropdown belongs to the card, not its body — a card that
+    // collapsed to a slim strip has no PanelBody but must still be adjustable
+    function cardFilterDrop(g, slim) {
+      var sts = Object.keys(g.counts || {}).sort(function (a, b) {
+        var ia = STATUS_ORDER.indexOf(a), ib = STATUS_ORDER.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      });
+      if (!sts.length) return null;
+      var cur = readCardHide(g.name);
+      return h("div", {
+        className: "kg-pfilter-dropdown" + (slim ? " kg-pfilter-float" : ""),
+        onClick: function (e) { e.stopPropagation(); },
+        onPointerDown: function (e) { e.stopPropagation(); }
+      },
+        h("div", { className: "kg-pfilter-hdr" }, "显示状态"),
+        sts.map(function (st) {
+          var gOff = !!(props.hideSt && props.hideSt[st]);
+          var off = !!cur[st];
+          return h("label", {
+            key: st,
+            className: "kg-pfilter-item" + (off || gOff ? " kg-pfilter-off" : ""),
+            title: gOff ? "该状态已被全局筛选隐藏" : undefined,
+            style: { color: STATUS_COLOR[st] || "#9ca3af" }
+          },
+            h("input", {
+              type: "checkbox",
+              checked: !off && !gOff,
+              disabled: gOff,
+              onChange: function () { toggleCardHide(g.name, st); }
+            }),
+            (ICON[st] || "●") + " " + (LABEL[st] || st) + " " + (g.counts[st] || "") + (gOff ? " · 全局" : "")
+          );
+        }));
+    }
+
     // v20.2: the status bar toggles the same store — adopt its changes
     useEffect(function () {
       function syncHidden() { setHidden(readHiddenProf()); }
@@ -3776,7 +3964,7 @@
       items.forEach(function (it) {
         if (it.kind !== "prof") return;
         var pn = panels[it.prof.name];
-        if (visibleBlocks(pn && pn.model, props.hideSt) === 0) slimSet[it.id] = 1;
+        if (visibleBlocks(pn && pn.model, effHideOf(it.prof.name)) === 0) slimSet[it.id] = 1;
       });
       var full = items.filter(function (it) { return !slimSet[it.id]; });
       var slim = items.filter(function (it) { return slimSet[it.id]; });
@@ -3852,6 +4040,31 @@
       return { nodes: n, edges: e2 };
     }, [groups]);
 
+    // v24: global status filter chips (same store as the single-board view)
+    var stCounts = {};
+    groups.forEach(function (g) { g.nodes.forEach(function (n) { stCounts[n.status] = (stCounts[n.status] || 0) + 1; }); });
+    var presentSt = Object.keys(stCounts).sort(function (a, b) {
+      var ia = STATUS_ORDER.indexOf(a), ib = STATUS_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    var stChips = presentSt.map(function (st) {
+      return h("button", {
+        key: st, type: "button",
+        className: "kg-chip kg-chip-btn kg-s-" + st + (props.hideSt[st] ? " kg-chip-off" : ""),
+        title: (LABEL[st] || st) + " · 点击" + (props.hideSt[st] ? "显示" : "隐藏"),
+        onClick: function () { props.toggleSt(st); }
+      }, (ICON[st] || "●") + " " + (LABEL[st] || st) + " " + stCounts[st]);
+    });
+    // v24: hidden group cards can be restored from here
+    var hiddenGchips = gcfg.filter(function (c) { return hiddenGroups[c.id]; }).map(function (c) {
+      return h("button", {
+        key: "hid-" + c.id, type: "button",
+        className: "kg-chip kg-chip-btn kg-chip-off",
+        title: "点击恢复这个分组卡片",
+        onClick: function () { toggleHiddenGroup(c.id); }
+      }, "组 " + c.name);
+    });
+
     var top = h("div", { className: "kg-top" },
       h("span", { className: "kg-brand" }, "Board+"),
       modeSwitch(props),
@@ -3872,7 +4085,9 @@
         title: "跨 profile 依赖连线",
         onClick: function () { var v = !showCross; setShowCross(v); lsSet(LS_XEDGE, v ? "1" : "0"); }
       }, "跨链 " + grouped.cross.length),
+      h("span", { className: "kg-chips" }, stChips),
       h("span", { className: "kg-chips" }, profChips),
+      h("span", { className: "kg-chips" }, hiddenGchips),
       h("span", { className: "kg-chip" }, "任务 " + totals.nodes),
       h("span", { className: "kg-chip" }, "边 " + totals.edges),
       isMax ? h(Button, {
@@ -3939,6 +4154,16 @@
         h("span", { className: "kg-pcount" }, g.nodes.length),
         h("span", { className: "kg-pdots" }, dots),
         g.cross ? h("span", { className: "kg-plink", title: "跨 profile 依赖 " + g.cross + " 条" }, "↔" + g.cross) : null,
+        (function () {
+          if (!Object.keys(g.counts || {}).length) return null; // nothing to filter
+          var n = Object.keys(readCardHide(g.name)).length;
+          return h("button", {
+            className: "kg-pfilt" + (n ? " kg-pfilt-on" : ""), type: "button",
+            title: n ? "本卡片已隐藏 " + n + " 种状态 · 点击调整" : "选择这张卡片显示哪些状态",
+            onPointerDown: function (e) { e.stopPropagation(); },
+            onClick: function (e) { e.stopPropagation(); setOpenFilter(openFilter === g.name ? "" : g.name); }
+          }, "筛选" + (n ? " " + n : ""));
+        })(),
         h("button", {
           className: "kg-pauto", type: "button",
           title: gid ? "自动排列这张卡片：任务块归位"
@@ -3958,16 +4183,19 @@
       var col = profColor(g.name);
       var isAct = activeOp && activeOp.id === g.name && (!gid || activeOp.gid === gid);
       var pn = panels[g.name];
-      var slim = !big && visibleBlocks(pn && pn.model, props.hideSt) === 0;
+      var hid = effHideOf(g.name);
+      var slim = !big && visibleBlocks(pn && pn.model, hid) === 0;
+      var fOpen = openFilter === g.name;
       var narrow = slim && r.w < 210; // v12 shelf: hide the arrange button on content-width strips
       var kids = [headBar(g, gid)];
       if (!slim) {
         kids.push(h(PanelBody, {
-          pid: g.name, panel: panels[g.name], hideSt: props.hideSt,
+          pid: g.name, panel: panels[g.name], hideSt: hid,
           metaOf: multiBoard ? function (n) { return n.board; } : null,
           big: !!big, ver: miniVer[g.name] || 0, onArrange: arrangeBlocks, onTask: props.onTask
         }));
       }
+      if (fOpen) kids.push(cardFilterDrop(g, slim));
       // v13: a collapsed strip gets the grip too — width-only (see op.strip)
       kids.push(h("div", {
         className: "kg-prsz" + (slim ? " kg-srsz" : ""), title: slim ? "拖动调整宽度" : "拖动缩放",
@@ -3975,7 +4203,7 @@
       }));
       return h("div", {
         key: (gid ? gid + "/" : "") + g.name,
-        className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : "") + (slim ? " kg-pstrip" : "") + (narrow ? " kg-pnarrow" : ""),
+        className: "kg-panel" + (isAct ? " kg-pactive" : "") + (gid ? " kg-pinner" : "") + (big ? " kg-pbig" : "") + (slim ? " kg-pstrip" : "") + (narrow ? " kg-pnarrow" : "") + (fOpen && slim ? " kg-filteropen" : ""),
         "data-prof": g.name,
         "data-in-group": gid || "",
         style: { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px", borderTopColor: col }
@@ -4059,6 +4287,12 @@
             onPointerDown: function (e) { e.stopPropagation(); },
             onClick: function (e) { e.stopPropagation(); autoArrangeCard(cfg.id, nested ? tokSelf : it.id); }
           }, "自动排列"),
+          h("button", {
+            className: "kg-ghide", type: "button",
+            title: "隐藏此分组（顶栏会出现恢复按钮）",
+            onPointerDown: function (e) { e.stopPropagation(); },
+            onClick: function (e) { e.stopPropagation(); toggleHiddenGroup(cfg.id); }
+          }, "隐藏"),
           h("button", {
             className: "kg-gx", type: "button", title: nested ? "移出父组" : "解散分组",
             onPointerDown: function (e) { e.stopPropagation(); },

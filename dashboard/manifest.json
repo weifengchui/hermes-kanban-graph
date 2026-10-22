@@ -6,7 +6,7 @@
   "icon": "Workflow",
   "tab": {
     "path": "/kanban-graph",
-    "position": "after:kanban"
+    "position": "after:skills"
   },
   "entry": "dist/index.js",
   "css": "dist/style.css",
