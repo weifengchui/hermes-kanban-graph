@@ -1,7 +1,7 @@
 ---
 name: board-plus-install
 description: "Install the Board+ dashboard plugin: version gate, install/enable, safe launch, headless checks, why a fresh board is empty. 跨机器通用安装技能（外部用户版）。"
-version: 2.1.0
+version: 2.2.0
 author: weifengchui
 license: MIT
 platforms: [windows, linux]
