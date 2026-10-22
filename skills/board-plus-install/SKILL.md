@@ -87,9 +87,40 @@ hermes -p <profile> kanban create "标题" --assignee <profile> [--parent t_xxxx
   或在 dashboard 自带 Kanban tab（`/kanban`）里建卡。双击 Board+ 卡片上的方块看详情/依赖；单板视图有依赖连线。
 - 演示/验收可建一对父子卡（`--parent` 出连线），完事 `kanban archive` 掉。
 
+## 升级（旧版 → 新版）
+
+先判断安装方式：插件目录里有 `.git` = CLI 安装，可 `plugins update`；没有 = install.sh / zip 安装，必须重装。
+
+```
+ls -d ~/.hermes/plugins/kanban-graph/.git 2>/dev/null        # 默认 profile
+ls -d ~/.hermes/profiles/<profile>/plugins/kanban-graph/.git 2>/dev/null
+```
+
+**A. CLI / git 安装**（默认 profile 去掉 `-p <profile>`）：
+```
+git -C <插件目录> rev-parse --short HEAD     # 升级前记下旧 sha，便于回滚
+hermes -p <profile> plugins update kanban-graph
+hermes -p <profile> plugins enable kanban-graph      # 幂等；升级后建议重跑
+hermes -p <profile> dashboard --stop
+hermes -p <profile> dashboard --no-open --port 9129 --host 127.0.0.1
+```
+
+**B. install.sh / 离线 zip 安装**：
+`hermes plugins update` 会报 `not installed from git`，属预期，不要反复试。取新版仓库（`git pull` 或解压新 zip），在仓库根重跑：
+```
+./install.sh <profile>
+```
+新版 install.sh 覆盖前会把旧安装整棵树备份到 `<profile目录>/plugin-backups/kanban-graph`（默认 profile 为 `~/.hermes/plugin-backups/kanban-graph`）并打印路径；只保留一份备份，要多版本请自行另存。随后同样 enable（第1步）+ 重启（第2步）。
+
+**升级后必做**
+1. 浏览器刷新页面：插件静态资源响应 `Cache-Control: no-store`，普通刷新即可；但后端 `api` 只在进程启动时导入，**必须重启 dashboard**。
+2. 重跑第3步四项机检，全绿才算升级成功。
+3. 布局/分组/筛选都在浏览器 localStorage，升级本身不迁移也不清空；换浏览器或清站点数据才会看起来“丢布局”。
+4. 回滚：git 安装用记录下的旧 sha `git -C <插件目录> checkout <sha>`；install.sh 安装把备份树拷回 `<插件目录>/`。之后重启 dashboard。
+
 ## 运维
 - 手工起的进程重启不自启：要常驻就自建 systemd/cron 拉起 + 第3步机检。
-- 升级：`hermes plugins update kanban-graph`，然后重启 dashboard 进程；升级后重跑一遍第1步的 diff 自检。
+- 升级：见上一节。git 安装用 `plugins update`；install.sh/离线安装重装（自动备份），不要对无 `.git` 的目录反复 `plugins update`。
 - **Hermes 升级后 tab 消失**：新构建的插件清单按 `plugins.enabled` 过滤，插件没进这个名单就静默不出 tab（同时它的 `api` 也不会被导入）。修：`hermes -p <profile> plugins enable kanban-graph` → 重启 dashboard 进程 → 跑第3步四项机检。
 - 卸载：`hermes -p <profile> plugins remove kanban-graph`，只删该 profile 目录内文件。
 - 问题反馈：GitHub issue → `weifengchui/hermes-kanban-graph`。
@@ -101,9 +132,13 @@ hermes -p <profile> kanban create "标题" --assignee <profile> [--parent t_xxxx
 | 升级后 tab 没了 | 新构建按 `plugins.enabled` 过滤；enable 条目不在名单里 | `hermes -p <profile> plugins enable kanban-graph` + 重启 dashboard |
 | tab 在但页面空白/接口 404 | 插件 `api` 在启动那一刻未 enable，没被导入 | enable 后重启 dashboard；机检加 `openapi.json` 看 `/api/plugins/kanban-graph/` 路由 |
 | enable 报 "No plugin named" | profile 插件目录缺根级 `plugin.yaml` | 复制仓库根 `plugin.yaml` 到 `<profile>/plugins/kanban-graph/`（新版 install.sh 自带） |
+| `plugins update` 报 "not installed from git" | 该安装无 `.git`（install.sh / zip 装的） | 属预期；重跑新版 `install.sh`（自动备份），见升级节 B |
+| 升级后仍是旧界面 | 标签页没刷新 / dashboard 进程没重启 | 刷新页面；API 变更必须重启进程（静态资源是 no-store） |
 | index.js 404 | 服务启动时的 home ≠ 本 profile | 第2步绕法；查 `[HERMES_HOME fallback]` 日志 |
 | clone 失败 | 网络抖动 | 重试；或 zip + `install.sh` 离线装 |
 | 看板空白 | 板上本来没任务 | `kanban create` 建卡，见数据来源节 |
+| 绿点一直不亮（Windows/macOS） | `/status` 靠扫 Linux `/proc` 判断运行中 profile | 非 Linux 属预期；任务展示不受影响 |
+| 升级后布局"没了" | 换了浏览器/清了站点数据（布局只在 localStorage） | 升级本身不写 localStorage；回旧浏览器恢复站点数据 |
 | 端口被占 | 别处已有看板 | 换端口，别动别人进程 |
 
 ## 兼容性备注

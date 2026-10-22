@@ -49,6 +49,19 @@ if [ ! -d "$PROFILE_DIR" ]; then
   exit 1
 fi
 
+# upgrading over an existing install: keep one copy of the previous plugin tree
+# so a bad release can be rolled back by copying it back. Only the latest
+# generation is kept (copy it elsewhere if you need more history).
+PLUGIN_ROOT="$(dirname "$DEST")"
+BACKUP_DIR=""
+if [ -f "$DEST/manifest.json" ]; then
+  BACKUP_DIR="$PROFILE_DIR/plugin-backups/kanban-graph"
+  rm -rf "$BACKUP_DIR"
+  mkdir -p "$BACKUP_DIR"
+  cp -R "$PLUGIN_ROOT/." "$BACKUP_DIR/"
+  echo "backed up previous install -> $BACKUP_DIR"
+fi
+
 mkdir -p "$DEST/dist"
 cp "$SRC/manifest.json" "$DEST/manifest.json"
 cp "$SRC/plugin_api.py" "$DEST/plugin_api.py"
@@ -60,6 +73,10 @@ if [ -f "$PLUGIN_YAML" ]; then
 fi
 
 echo "installed -> $DEST"
+if [ -n "$BACKUP_DIR" ]; then
+  echo "previous install backed up -> $BACKUP_DIR"
+  echo "roll back by copying that tree back over $PLUGIN_ROOT"
+fi
 echo
 echo "enable it (newer builds list the tab only for plugins in plugins.enabled):"
 if [ -n "$PROFILE" ]; then
@@ -69,5 +86,10 @@ else
 fi
 echo
 echo "restart the dashboard so plugin_api.py is loaded:"
-echo "  hermes dashboard --stop && hermes dashboard --no-open --port 9119"
+if [ -n "$PROFILE" ]; then
+  echo "  hermes -p $PROFILE dashboard --stop && hermes -p $PROFILE dashboard --no-open --port 9119"
+else
+  echo "  hermes dashboard --stop && hermes dashboard --no-open --port 9119"
+fi
 echo "then open http://127.0.0.1:9119/kanban-graph"
+echo "(reload the page after an upgrade; plugin assets are served no-store)"
