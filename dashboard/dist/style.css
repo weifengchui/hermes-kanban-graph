@@ -21,6 +21,14 @@
   border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
 }
 .kg-brand { font-weight: 600; opacity: .85; margin-right: 2px; }
+.kg-ver {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: .5;
+  letter-spacing: .3px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .kg-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .kg-chip {
   padding: 1px 8px;

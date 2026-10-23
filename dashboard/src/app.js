@@ -10,6 +10,10 @@
   var comps = SDK.components || {};
   var Badge = comps.Badge, Button = comps.Button, Select = comps.Select, SelectOption = comps.SelectOption;
   var API = "/api/plugins/kanban-graph";
+  // Release anchor shown in the page title. This repo has no git tags, so the
+  // vNN in the main commit subject is the only version line — bump it with the
+  // release commit; the headless probes assert window.__KG_TEST__.KG_VERSION.
+  var KG_VERSION = "v24.1";
 
   // ── Hermes 运行状态条 ──
   // 绿点=该 profile 的 gateway 进程在跑（后端 GET /api/plugins/kanban-graph/api/status
@@ -4488,7 +4492,38 @@
   }
 
   // ─────────────────────────── page ───────────────────────────
+  // The host page header (H1 = plugin label) owns a React after-title slot that
+  // the plugin SDK does not expose, so hang the release tag right after that H1
+  // and re-attach whenever React swaps the node out.
+  function useHeaderVersion() {
+    useEffect(function () {
+      var badge = null, raf = 0, mo = null;
+      function place() {
+        raf = 0;
+        var h1 = document.querySelector('header[role="banner"] h1');
+        if (!h1 || (h1.textContent || "").indexOf("Board+") !== 0) return;
+        if (!badge) {
+          badge = document.createElement("span");
+          badge.className = "kg-ver";
+          badge.textContent = KG_VERSION;
+          badge.title = "Board+ " + KG_VERSION;
+        }
+        if (h1.nextElementSibling !== badge) h1.insertAdjacentElement("afterend", badge);
+      }
+      function schedule() { if (!raf) raf = window.requestAnimationFrame(place); }
+      place();
+      mo = new MutationObserver(schedule);
+      mo.observe(document.body, { childList: true, subtree: true });
+      return function () {
+        mo.disconnect();
+        if (raf) window.cancelAnimationFrame(raf);
+        if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+      };
+    }, []);
+  }
+
   function KanbanGraphPage() {
+    useHeaderVersion();
     var s;
     s = useState(readMode); var mode = s[0], setMode = s[1];
     s = useState([]); var boards = s[0], setBoards = s[1];
@@ -4629,6 +4664,7 @@
 
   // internals exposed for headless acceptance tests (no UI dependency)
   window.__KG_TEST__ = {
+    KG_VERSION: KG_VERSION,
     fsSupported: function () {
       return !!(document.documentElement.requestFullscreen && document.fullscreenEnabled !== false);
     },
