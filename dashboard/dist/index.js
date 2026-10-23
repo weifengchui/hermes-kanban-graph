@@ -13,7 +13,7 @@
   // Release anchor shown in the page title. This repo has no git tags, so the
   // vNN in the main commit subject is the only version line — bump it with the
   // release commit; the headless probes assert window.__KG_TEST__.KG_VERSION.
-  var KG_VERSION = "v24.1";
+  var KG_VERSION = "v24.2";
 
   // ── Hermes 运行状态条 ──
   // 绿点=该 profile 的 gateway 进程在跑（后端 GET /api/plugins/kanban-graph/api/status
@@ -671,11 +671,27 @@
         dmap.set(drawn[k].id, drawn[k]);
         pl2.set(drawn[k].id, { x: G.M + Math.floor(k / colRows) * CW, y: G.M + (k % colRows) * CH });
       }
+      // v24.2 fix: the compact-card branch still has to answer "who is related
+      // to this block" — the empty maps made in-card selection dim every block
+      // and highlight no edge at all.
+      var kParents = new Map(), kChildren = new Map();
+      for (k = 0; k < drawn.length; k++) {
+        kParents.set(drawn[k].id, []);
+        kChildren.set(drawn[k].id, []);
+      }
+      for (i = 0; i < es.length; i++) {
+        kChildren.get(es[i].parent).push(es[i].child);
+        kParents.get(es[i].child).push(es[i].parent);
+      }
+      for (i = 0; i < bes.length; i++) {
+        kChildren.get(bes[i].parent).push(bes[i].child);
+        kParents.get(bes[i].child).push(bes[i].parent);
+      }
       return {
         placed: pl2, ulPos: new Map(),
         width: colsN ? G.M * 2 + colsN * G.W + (colsN - 1) * G.GX : 0,
         height: colRows ? G.M * 2 + colRows * G.H + (colRows - 1) * G.GY : 0,
-        xShift: 0, parents: new Map(), children: new Map(), nodeMap: dmap,
+        xShift: 0, parents: kParents, children: kChildren, nodeMap: dmap,
         unlinked: [], edges: es, backEdges: bes, routes: [],
         ulActive: ulActive, ulHiddenTerm: ulHiddenTerm, ulHdrX: 0, ulHdrY: 0, geo: G
       };
@@ -2386,11 +2402,10 @@
       var pos = view.placed.get(n.id);
       if (!pos) return null;
       if (hideSt[n.status]) return null;
-      var dim = highlight && !highlight.has(n.id);
       var hl = highlight && highlight.has(n.id);
       var isDrag = ndragging && ndRef.current && ndRef.current.id === n.id;
       return renderNode(n, pos, GEO_MAIN, {
-        cls: (dim ? " kg-dim" : "") + (selected === n.id ? " kg-sel" : "") + (hl && selected !== n.id ? " kg-hl" : "") + (isDrag ? " kg-ndrag" : "") + (extraCls || ""),
+        cls: (selected === n.id ? " kg-sel" : "") + (hl && selected !== n.id ? " kg-hl" : "") + (isDrag ? " kg-ndrag" : "") + (extraCls || ""),
         comet: COMET_D,
         handlers: nodeHandlers(n.id),
         hsz: Math.max(4, Math.round(9 / (zoom || 1)))
@@ -2844,8 +2859,7 @@
         if (!pos || fitsHide(n, props.hideSt)) return;
         var isSel = !!selSet[n.id];
         var isHl = hlSet && hlSet.has(n.id) && !isSel;
-        var isDim = hlSet && !hlSet.has(n.id);
-        kids.push(renderNode(n, pos, G, { cls: (isSel ? " kg-sel" : "") + (isHl ? " kg-hl" : "") + (isDim ? " kg-dim" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
+        kids.push(renderNode(n, pos, G, { cls: (isSel ? " kg-sel" : "") + (isHl ? " kg-hl" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
       pin.group.nodes.forEach(function (n) {
         if (mdl.nodeMap.has(n.id)) return;
@@ -2853,8 +2867,7 @@
         if (!pos || fitsHide(n, props.hideSt)) return;
         var isSel = !!selSet[n.id];
         var isHl = hlSet && hlSet.has(n.id) && !isSel;
-        var isDim = hlSet && !hlSet.has(n.id);
-        kids.push(renderNode(n, pos, G, { cls: " kg-uln" + (isSel ? " kg-sel" : "") + (isHl ? " kg-hl" : "") + (isDim ? " kg-dim" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
+        kids.push(renderNode(n, pos, G, { cls: " kg-uln" + (isSel ? " kg-sel" : "") + (isHl ? " kg-hl" : ""), comet: cometMini, metaOf: props.metaOf, handlers: handlersFor(n), hsz: Math.max(4, Math.round(9 / (scale || 1))) }));
       });
       // v23: the rubber band sits ON TOP of the blocks it covers
       if (marq) {

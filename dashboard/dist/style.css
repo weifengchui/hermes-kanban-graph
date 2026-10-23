@@ -112,7 +112,6 @@
   pointer-events: none;
 }
 .kg-node.kg-s-done { opacity: .6; }
-.kg-node.kg-dim { opacity: .18; }
 
 /* running nodes: a glowing light streak circling the border (crisp head +
    blurred tail, pathLength=100 so dash math is perimeter-independent) */
